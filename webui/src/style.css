@@ -207,6 +207,8 @@ a.nav{text-decoration:none}
 .ncard{background:var(--fill);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
 .ncard .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ncard .acts{display:flex;justify-content:flex-end;gap:2px;margin-top:4px}
+.ncard.pickable{cursor:pointer}
+.ncard.picked{background:var(--accent-soft);box-shadow:inset 0 0 0 1.5px var(--accent)}
 .srow{display:flex;align-items:center;gap:8px;background:var(--fill);border-radius:12px;padding:6px 8px 6px 10px;cursor:grab;touch-action:pan-y}
 .srow .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .field>.label{font-size:13px;color:var(--muted)}

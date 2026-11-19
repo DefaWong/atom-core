@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError, call, client, describe } from '../api/client'
 import AppModal from '../components/AppModal.vue'
 import NodeModal from '../components/NodeModal.vue'
 import ProviderModal from '../components/ProviderModal.vue'
 import { limited, testNode, testPoolNode, testing } from '../composables/delay'
 import { usePoll } from '../composables/poll'
-import { loadPool, loadProviders, loadProxy, loadRuntime, nameOf, nodes, poolNodes, providers, providerUpdated, reportFailure, runtime, version, type Node, type Provider } from '../composables/proxy'
+import { FINAL, final, groups, loadPool, loadProviders, loadProxy, loadRuntime, membersOf, nameOf, nodes, poolNodes, providers, providerUpdated, reportFailure, runtime, version, type Node, type Provider } from '../composables/proxy'
 import { isMihomo, refreshStatus } from '../composables/status'
 import { toast } from '../composables/toast'
 import { ago, latency, type Latency } from '../format'
@@ -117,6 +117,77 @@ async function remove() {
     await reportFailure(failure)
   } finally {
     removing.value = null
+    busy.value = false
+    refreshStatus().catch(() => {})
+  }
+}
+
+// ---- batch deletion: manual nodes only (a subscription's nodes come and go with it) ----
+const selecting = ref(false)
+const picked = ref<Set<string>>(new Set())
+const confirmingBatch = ref(false)
+// A node deleted or replaced elsewhere leaves the selection when the list is read again.
+watch(nodes, (list) => {
+  const ids = new Set(list.map((node) => node.id))
+  const kept = [...picked.value].filter((id) => ids.has(id))
+  if (kept.length !== picked.value.size) picked.value = new Set(kept)
+})
+const shownManual = computed(() => shown.value.filter((item) => item.node))
+function startSelecting() {
+  picked.value = new Set()
+  selecting.value = true
+}
+function stopSelecting() {
+  selecting.value = false
+  picked.value = new Set()
+}
+function toggle(item: Item) {
+  if (!item.node) return
+  const next = new Set(picked.value)
+  if (next.has(item.id)) next.delete(item.id)
+  else next.add(item.id)
+  picked.value = next
+}
+const pickShown = () => (picked.value = new Set([...picked.value, ...shownManual.value.map((item) => item.id)]))
+function invertShown() {
+  const next = new Set(picked.value)
+  for (const item of shownManual.value) {
+    if (next.has(item.id)) next.delete(item.id)
+    else next.add(item.id)
+  }
+  picked.value = next
+}
+const timedOut = computed(() => items.value.filter((item) => item.node && item.kind === 'bad'))
+const pickTimedOut = () => (picked.value = new Set([...picked.value, ...timedOut.value.map((item) => item.id)]))
+/** What the deletion does: the groups (and Final) the picked nodes leave, and those left with no member. */
+const batchSummary = computed(() => {
+  const ids = picked.value
+  const left = new Set<string>()
+  for (const node of nodes.value) if (ids.has(node.id)) for (const group of node.groups) left.add(group)
+  if (final.value?.members.some((id) => ids.has(id))) left.add(FINAL)
+  const emptied: string[] = []
+  for (const group of groups.value) {
+    const members = membersOf(group)
+    const fromProviders = group.all_providers || (group.providers?.length ?? 0) > 0
+    if (!group.empty && !fromProviders && members.length && members.every((id) => ids.has(id))) emptied.push(group.id)
+  }
+  if (final.value && final.value.members.length && final.value.members.every((id) => ids.has(id))) emptied.push(FINAL)
+  return { left: [...left].map(nameOf), emptied: emptied.map(nameOf) }
+})
+async function removePicked() {
+  const ids = nodes.value.filter((node) => picked.value.has(node.id)).map((node) => node.id)
+  if (!ids.length) return
+  busy.value = true
+  try {
+    const answer = await call(client.POST('/nodes/delete', { body: { ids, version: version.value } }))
+    toast('ok', `已删除 ${answer.deleted.length} 个节点`)
+    confirmingBatch.value = false
+    stopSelecting()
+    await loadProxy().catch(() => {})
+  } catch (failure) {
+    confirmingBatch.value = false
+    await reportFailure(failure)
+  } finally {
     busy.value = false
     refreshStatus().catch(() => {})
   }
@@ -249,11 +320,29 @@ function closeProvider() {
         <option value="delay">按延迟</option>
       </select>
       <button class="btn" type="button" :disabled="testingAll" @click="testAll">全部测速</button>
+      <button class="btn" type="button" :class="{ pri: selecting }" :disabled="!nodes.length && !selecting" @click="selecting ? stopSelecting() : startSelecting()">选择</button>
       <button class="btn pri" type="button" @click="importing = true">＋ 添加节点</button>
     </div>
+    <div v-if="selecting" class="row" style="margin-bottom: 10px">
+      <button class="btn" type="button" :disabled="!shownManual.length" @click="pickShown">全选当前筛选</button>
+      <button class="btn" type="button" :disabled="!shownManual.length" @click="invertShown">反选</button>
+      <button class="btn" type="button" :disabled="!timedOut.length" @click="pickTimedOut">选中超时节点</button>
+      <span class="tag">已选 {{ picked.size }}</span>
+      <span class="sp"></span>
+      <button class="btn red" type="button" :disabled="!picked.size || busy" @click="confirmingBatch = true">删除</button>
+      <button class="btn" type="button" @click="stopSelecting">取消</button>
+    </div>
     <div class="ncards">
-      <div v-for="item in shown" :key="item.id" class="ncard" :style="item.inactive ? { opacity: 0.6 } : undefined">
+      <div
+        v-for="item in shown"
+        :key="item.id"
+        class="ncard"
+        :class="{ pickable: selecting && item.node, picked: selecting && picked.has(item.id) }"
+        :style="item.inactive || (selecting && !item.node) ? { opacity: selecting && !item.node ? 0.4 : 0.6 } : undefined"
+        @click="selecting && toggle(item)"
+      >
         <div class="row">
+          <input v-if="selecting && item.node" type="checkbox" :checked="picked.has(item.id)" :aria-label="`选择「${item.name}」`" @click.stop="toggle(item)" />
           <span class="tag">{{ item.type }}</span>
           <span v-if="isMihomo" class="tag" :class="{ acc: item.source }">{{ item.sourceName }}</span>
           <span class="sp"></span>
@@ -264,7 +353,7 @@ function closeProvider() {
         <div v-if="item.inactive" class="t2">{{ item.inactive }}</div>
         <div v-else-if="item.addr" class="t2 mono">{{ item.addr }}</div>
         <div v-if="item.node" class="hint">所在组：{{ item.groups.map(nameOf).join('、') || '无' }}</div>
-        <div class="acts">
+        <div v-if="!selecting" class="acts">
           <button v-if="item.node" class="ico" type="button" aria-label="复制地址" title="复制地址" @click="copy(item.addr)">
             <svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M4 16V4h12" /></svg>
           </button>
@@ -292,6 +381,15 @@ function closeProvider() {
   </AppModal>
   <NodeModal v-if="importing" @close="importing = false" />
   <NodeModal v-if="editing" :node="editing" @close="editing = null" />
+  <AppModal v-if="confirmingBatch" :title="`删除 ${picked.size} 个节点`" @close="confirmingBatch = false">
+    <div>将删除选中的 {{ picked.size }} 个手动节点，此操作不可撤销。</div>
+    <div v-if="batchSummary.left.length" class="hint">它们会从 {{ batchSummary.left.join('、') }} 中移除。</div>
+    <div v-if="batchSummary.emptied.length" class="hint" style="color: var(--bad)">删除后这些组将没有成员：{{ batchSummary.emptied.join('、') }}</div>
+    <template #footer>
+      <button class="btn" type="button" @click="confirmingBatch = false">取消</button>
+      <button class="btn red" type="button" :disabled="busy" @click="removePicked">删除</button>
+    </template>
+  </AppModal>
   <AppModal v-if="removing" :title="`删除节点「${removing.name}」`" @close="removing = null">
     <div v-if="removing.groups.length">它会从 {{ removing.groups.map(nameOf).join('、') }} 中移除。</div>
     <template #footer>

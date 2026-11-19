@@ -7,6 +7,7 @@
 //! |---|---|
 //! | `nodes` | GET, POST `{format: json\|yaml\|link, content}` (import) |
 //! | `nodes/{id}` | GET, PUT `{name?, format?, content?}`, DELETE |
+//! | `nodes/delete` | POST `{ids}` (delete several nodes at once, all or none) |
 //! | `nodes/{id}/delay` | POST `{url?, timeout?}` (Clash API) |
 //! | `groups` | GET, POST `{name, type, members, ...}` |
 //! | `groups/{id}` | GET, PUT, DELETE (`?confirm=true`) |
@@ -355,6 +356,69 @@ async fn delete_node(rules: &AtomRules, id: &str, query: Option<&str>) -> Answer
         200,
         &json!({ "version": version, "deleted": id }),
     ))
+}
+
+/// `POST nodes/delete`: deletes several nodes in one change (one sing-box
+/// apply). All or none: when any ID cannot be deleted (missing, or still the
+/// download node of a subscription) nothing changes and the error lists every
+/// refused ID in `failed`.
+async fn delete_nodes(rules: &AtomRules, bytes: &[u8]) -> Answer {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Batch {
+        ids: Vec<String>,
+    }
+    let (version, map) = object(bytes)?;
+    let batch: Batch = from_map(map)?;
+    if batch.ids.is_empty() {
+        return Err(error(400, "ids 不能为空"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    if let Some(id) = batch.ids.iter().find(|id| !seen.insert(id.as_str())) {
+        return Err(error(400, format!("ids 中节点 `{id}` 重复")));
+    }
+    rules.check_proxy_version(version).map_err(|e| fail(&e))?;
+    let mut next = state(rules);
+    let mut failed = Vec::new();
+    for id in &batch.ids {
+        if let Err(refused) = next.remove_node(id) {
+            failed.push(refused_view(id, refused));
+        }
+    }
+    if !failed.is_empty() {
+        // 409 when any node is still in use, otherwise all were missing: 404.
+        let status = failed
+            .iter()
+            .map(|(status, _)| *status)
+            .max()
+            .unwrap_or(409);
+        let reasons: Vec<String> = failed
+            .iter()
+            .map(|(_, item)| item["error"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        return Err(reply_json(
+            status,
+            &json!({
+                "error": format!("有 {} 个节点无法删除，未做任何修改：{}", failed.len(), reasons.join("；")),
+                "failed": failed.into_iter().map(|(_, item)| item).collect::<Vec<_>>(),
+            }),
+        ));
+    }
+    next.version += 1;
+    let version = next.version;
+    rules
+        .transact(None, Some(next), "nodes")
+        .await
+        .map_err(|e| fail(&e))?;
+    Ok(reply_json(
+        200,
+        &json!({ "version": version, "deleted": batch.ids }),
+    ))
+}
+
+/// One refused ID of a batch: its status and `{id, error}`.
+fn refused_view(id: &str, refused: Refusal) -> (u16, Value) {
+    (refused.status, json!({ "id": id, "error": refused.message }))
 }
 
 // ---- groups ---------------------------------------------------------------
@@ -1263,6 +1327,8 @@ pub(crate) async fn handle(
             ))
         }
         ("POST", ["nodes"]) => import_nodes(rules, body).await,
+        // Node IDs start with `n-`, so `delete` is never one.
+        ("POST", ["nodes", "delete"]) => delete_nodes(rules, body).await,
         ("GET", ["nodes", id]) => {
             let state = current();
             match state.node(id) {
