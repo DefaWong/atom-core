@@ -40,4 +40,9 @@ export const phaseLabels: Record<Schemas['MaintenanceJob']['phase'], string> = {
   failed: '操作失败',
   restored: '已恢复',
   recovery_failed: '恢复失败',
+  preparing: '正在准备安装向导',
+  awaiting_browser: '等待打开安装向导',
+  resetting: '正在重置',
+  reset: '已开始重置，请在安装向导中完成安装',
+  cancelled: '已取消',
 }

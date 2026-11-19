@@ -759,6 +759,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/maintenance/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reset Atom to a new installation through the install wizard
+         * @description Starts the install wizard in reset mode and nothing else. The job
+         *     reaches `awaiting_browser` with `wizard_port`, `wizard_code` and
+         *     `wizard_urls`; the panel sends the browser there with the code in the
+         *     URL fragment (`#code=`). Only a browser that authorizes with the code
+         *     makes the wizard back the data up, remove the installation and its
+         *     data, and continue as a new installation (the job ends as `reset`).
+         *     Nobody within `deadline` ends the job as `cancelled` with nothing
+         *     changed.
+         */
+        post: operations["resetAtom"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/maintenance/confirm": {
         parameters: {
             query?: never;
@@ -1370,9 +1397,9 @@ export interface components {
         MaintenanceJob: {
             id: string;
             /** @enum {string} */
-            kind: "check" | "upgrade" | "network";
+            kind: "check" | "upgrade" | "network" | "reset";
             /** @enum {string} */
-            phase: "checking" | "downloading" | "validating" | "applying" | "awaiting_confirmation" | "restoring" | "success" | "failed" | "restored" | "recovery_failed";
+            phase: "checking" | "downloading" | "validating" | "applying" | "awaiting_confirmation" | "restoring" | "success" | "failed" | "restored" | "recovery_failed" | "preparing" | "awaiting_browser" | "resetting" | "reset" | "cancelled";
             source?: string;
             version?: string;
             error?: string;
@@ -1385,6 +1412,12 @@ export interface components {
             old_urls?: string[];
             new_urls?: string[];
             same_access?: boolean;
+            /** @description Reset, `awaiting_browser`; the install wizard's port. */
+            wizard_port?: number;
+            /** @description Reset, `awaiting_browser`; the wizard's one-time install code, cleared when the job ends. */
+            wizard_code?: string;
+            /** @description Reset; the wizard on the LAN addresses. */
+            wizard_urls?: string[];
         };
         MaintenanceNetwork: {
             /** @enum {string} */
@@ -3967,6 +4000,23 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["MaintenanceNetworkRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["MaintenanceAccepted"];
+            default: components["responses"]["Error"];
+        };
+    };
+    resetAtom: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Record<string, never>;
             };
         };
         responses: {

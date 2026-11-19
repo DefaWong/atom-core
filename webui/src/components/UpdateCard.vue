@@ -8,7 +8,7 @@ const checking = ref(false)
 const updateError = ref('')
 const latest = computed(() => job.value?.kind === 'check' && job.value.phase === 'success' ? job.value.version : undefined)
 const latestNotes = computed(() => latest.value ? `https://github.com/jasonxtt/atom/releases/tag/v${latest.value}` : '')
-const updateJob = computed(() => job.value?.kind !== 'network' ? job.value : undefined)
+const updateJob = computed(() => job.value?.kind === 'check' || job.value?.kind === 'upgrade' ? job.value : undefined)
 
 async function update(kind: 'check' | 'upgrade') {
   const version = latest.value

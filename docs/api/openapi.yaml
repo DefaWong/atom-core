@@ -1818,6 +1818,32 @@ paths:
                 $ref: "#/components/schemas/MaintenanceNetworkView"
         default:
           $ref: "#/components/responses/Error"
+  /maintenance/reset:
+    post:
+      tags: [maintenance]
+      summary: Reset Atom to a new installation through the install wizard
+      description: |
+        Starts the install wizard in reset mode and nothing else. The job
+        reaches `awaiting_browser` with `wizard_port`, `wizard_code` and
+        `wizard_urls`; the panel sends the browser there with the code in the
+        URL fragment (`#code=`). Only a browser that authorizes with the code
+        makes the wizard back the data up, remove the installation and its
+        data, and continue as a new installation (the job ends as `reset`).
+        Nobody within `deadline` ends the job as `cancelled` with nothing
+        changed.
+      operationId: resetAtom
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "202":
+          $ref: "#/components/responses/MaintenanceAccepted"
+        default:
+          $ref: "#/components/responses/Error"
   /maintenance/confirm:
     post:
       tags: [maintenance]
@@ -2951,10 +2977,10 @@ components:
         id: {type: string}
         kind:
           type: string
-          enum: [check, upgrade, network]
+          enum: [check, upgrade, network, reset]
         phase:
           type: string
-          enum: [checking, downloading, validating, applying, awaiting_confirmation, restoring, success, failed, restored, recovery_failed]
+          enum: [checking, downloading, validating, applying, awaiting_confirmation, restoring, success, failed, restored, recovery_failed, preparing, awaiting_browser, resetting, reset, cancelled]
         source: {type: string}
         version: {type: string}
         error: {type: string}
@@ -2969,6 +2995,16 @@ components:
           type: array
           items: {type: string}
         same_access: {type: boolean}
+        wizard_port:
+          type: integer
+          description: Reset, `awaiting_browser`; the install wizard's port.
+        wizard_code:
+          type: string
+          description: Reset, `awaiting_browser`; the wizard's one-time install code, cleared when the job ends.
+        wizard_urls:
+          type: array
+          items: {type: string}
+          description: Reset; the wizard on the LAN addresses.
     MaintenanceNetwork:
       type: object
       required: [topology, lan, wan, accept_gateway, lan_gateway, client_nets, reply_via, router, panel_port]

@@ -139,6 +139,7 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("GET", "maintenance/network"),
     ("POST", "maintenance/network"),
     ("POST", "maintenance/confirm"),
+    ("POST", "maintenance/reset"),
     ("GET", "apply"),
     ("POST", "apply"),
     ("GET", "dns"),
