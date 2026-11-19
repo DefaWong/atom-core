@@ -294,6 +294,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/nodes/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Delete several nodes at once (all or none)
+         * @description Every listed node leaves every group and Final, in one change (one
+         *     sing-box apply). When any ID cannot be deleted (missing: 404, still
+         *     the download node of a subscription: 409) nothing changes, and the
+         *     error lists every refused ID in `failed`.
+         */
+        post: operations["deleteNodes"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/nodes/{id}/delay": {
         parameters: {
             query?: never;
@@ -1570,6 +1593,11 @@ export interface components {
             error: string;
             version?: components["schemas"]["Version"];
             rules?: string[];
+            /** @description The IDs a batch deletion refused, each with its reason. */
+            failed?: {
+                id: string;
+                error: string;
+            }[];
         };
         Version: number;
         /**
@@ -2898,6 +2926,41 @@ export interface operations {
                     "application/json": components["schemas"]["Deleted"];
                 };
             };
+            404: components["responses"]["Error"];
+            409: components["responses"]["Conflict"];
+            502: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    deleteNodes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    ids: string[];
+                    version?: components["schemas"]["Version"];
+                };
+            };
+        };
+        responses: {
+            /** @description Deleted. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        version: components["schemas"]["Version"];
+                        deleted: string[];
+                    };
+                };
+            };
+            400: components["responses"]["Error"];
             404: components["responses"]["Error"];
             409: components["responses"]["Conflict"];
             502: components["responses"]["Error"];

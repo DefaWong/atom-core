@@ -1571,3 +1571,76 @@ fn backend_check_lists_nodes_mihomo_cannot_run_and_the_switch_needs_confirmation
     let (_, settings) = api.call("GET", "/api/v1/atom/settings", "");
     assert_eq!(settings["backend"], "sing-box");
 }
+
+/// `POST nodes/delete` deletes several nodes with one sing-box reload; when
+/// any ID is refused nothing changes and every refused ID is listed.
+#[test]
+fn a_batch_deletion_is_all_or_none() {
+    let api = Api::new("batch-delete");
+    let (status, imported) = api.call("POST", "/api/v1/atom/nodes", TWO_LINKS);
+    assert_eq!(status, 201, "{imported}");
+    let hk = imported["nodes"][0]["id"].as_str().unwrap().to_owned();
+    let jp = imported["nodes"][1]["id"].as_str().unwrap().to_owned();
+    let (status, provider) = api.call(
+        "POST",
+        "/api/v1/atom/providers",
+        &format!(r#"{{"name":"机场","url":"https://example.test/sub","download_via":"{hk}"}}"#),
+    );
+    assert_eq!(status, 201, "{provider}");
+    let provider_id = provider["provider"]["id"].as_str().unwrap().to_owned();
+
+    for body in [r#"{"ids": []}"#.to_owned(), format!(r#"{{"ids": ["{jp}", "{jp}"]}}"#), "{}".to_owned()] {
+        let (status, refused) = api.call("POST", "/api/v1/atom/nodes/delete", &body);
+        assert_eq!(status, 400, "{body}: {refused}");
+    }
+    let (_, before) = api.call("GET", "/api/v1/atom/nodes", "");
+    let (file, reloads) = (api.fake.live(), api.fake.reload_count());
+    // A node still used to download a subscription: nothing is deleted.
+    let (status, refused) = api.call(
+        "POST",
+        "/api/v1/atom/nodes/delete",
+        &format!(r#"{{"ids": ["{jp}", "{hk}", "n-missing"]}}"#),
+    );
+    assert_eq!(status, 409, "{refused}");
+    let failed: Vec<&str> = refused["failed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(failed, [hk.as_str(), "n-missing"]);
+    assert!(refused["error"].as_str().unwrap().contains(&hk));
+    let (status, missing) = api.call(
+        "POST",
+        "/api/v1/atom/nodes/delete",
+        &format!(r#"{{"ids": ["{jp}", "n-missing"]}}"#),
+    );
+    assert_eq!(status, 404, "{missing}");
+    let (_, after) = api.call("GET", "/api/v1/atom/nodes", "");
+    assert_eq!(after, before, "state unchanged");
+    assert_eq!((api.fake.live(), api.fake.reload_count()), (file, reloads));
+    // A stale version is refused like every write.
+    let (status, _) = api.call(
+        "POST",
+        "/api/v1/atom/nodes/delete",
+        &format!(r#"{{"ids": ["{jp}"], "version": 0}}"#),
+    );
+    assert_eq!(status, 409);
+
+    let (status, _) = api.call("DELETE", &format!("/api/v1/atom/providers/{provider_id}"), "");
+    assert_eq!(status, 200);
+    let (_, listed) = api.call("GET", "/api/v1/atom/nodes", "");
+    let version = listed["version"].as_u64().unwrap();
+    let reloads = api.fake.reload_count();
+    let (status, deleted) = api.call(
+        "POST",
+        "/api/v1/atom/nodes/delete",
+        &format!(r#"{{"ids": ["{hk}", "{jp}"], "version": {version}}}"#),
+    );
+    assert_eq!(status, 200, "{deleted}");
+    assert_eq!(deleted["version"], version + 1);
+    assert_eq!(deleted["deleted"], serde_json::json!([hk, jp]));
+    assert_eq!(api.fake.reload_count(), reloads + 1, "one reload");
+    let (_, listed) = api.call("GET", "/api/v1/atom/nodes", "");
+    assert_eq!(listed["nodes"], serde_json::json!([]));
+}

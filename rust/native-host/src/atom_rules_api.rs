@@ -110,6 +110,7 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("GET", "nodes/{id}"),
     ("PUT", "nodes/{id}"),
     ("DELETE", "nodes/{id}"),
+    ("POST", "nodes/delete"),
     ("POST", "nodes/{id}/delay"),
     ("GET", "providers"),
     ("POST", "providers"),
