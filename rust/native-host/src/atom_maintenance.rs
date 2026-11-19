@@ -20,6 +20,8 @@ pub(crate) fn route(method: &str, path: &str) -> Option<&'static str> {
         ("POST", "/check") => Some("/check"),
         ("POST", "/upgrade") => Some("/upgrade"),
         ("POST", "/confirm") => Some("/confirm"),
+        // The factory reset: the worker starts the install wizard and the panel hands over to it.
+        ("POST", "/reset") => Some("/reset"),
         _ => None,
     }
 }
@@ -124,6 +126,17 @@ mod tests {
         fs::write(root.join("maintenance-job.json"), br#"{"blocking":false}"#).unwrap();
         assert!(write_guard(&socket).unwrap().is_some());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn routes_only_the_worker_endpoints() {
+        assert_eq!(
+            route("POST", "/api/v1/atom/maintenance/reset"),
+            Some("/reset")
+        );
+        assert_eq!(route("GET", "/api/v1/atom/maintenance/reset"), None);
+        assert_eq!(route("POST", "/api/v1/atom/maintenance/reset/x"), None);
+        assert_eq!(route("POST", "/api/v1/atom/maintenance"), None);
     }
 
     #[test]

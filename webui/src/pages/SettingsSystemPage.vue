@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import SettingsTabs from '../components/SettingsTabs.vue'
+import ResetCard from '../components/ResetCard.vue'
 import UpdateCard from '../components/UpdateCard.vue'
 import { maintenance } from '../composables/maintenance'
 import { backendName, backendVersion, status } from '../composables/status'
@@ -16,4 +17,5 @@ import { backendName, backendVersion, status } from '../composables/status'
       <span>{{ backendName }}</span><span class="mono">{{ backendVersion || '—' }}</span>
     </div>
   </section>
+  <ResetCard v-if="maintenance" />
 </template>
