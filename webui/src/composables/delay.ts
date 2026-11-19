@@ -30,6 +30,11 @@ export async function testPoolNode(id: string) {
     const node = poolNodes.value.find((item) => item.id === id)
     if (node) Object.assign(node, { delay: answer.delay ?? null, alive: answer.delay != null })
   } catch (error) {
+    // The healthcheck failed (502 `测速失败…`): show it as a timeout until the pool reads again.
+    if (error instanceof ApiError && error.status === 502 && error.message.startsWith('测速失败')) {
+      const node = poolNodes.value.find((item) => item.id === id)
+      if (node) Object.assign(node, { delay: null, alive: false })
+    }
     toast('bad', describe(error), 5000)
   } finally {
     delete testing[id]

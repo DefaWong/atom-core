@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { call, client, describe, type Schemas } from '../api/client'
 import { usePoll } from '../composables/poll'
-import { loadRuntime, runtime } from '../composables/proxy'
+import { isPoolNode, loadPool, loadRuntime, poolNodes, runtime } from '../composables/proxy'
 import { backendName, refreshStatus, status } from '../composables/status'
 import { sparkArea, sparkLine } from '../composables/spark'
 import { toast } from '../composables/toast'
@@ -91,7 +91,9 @@ async function loadState() {
     call(client.GET('/settings')),
     call(client.GET('/dns')),
     // Shared with the group and node pages (it keeps failed tests).
-    loadRuntime()
+    loadRuntime(),
+    // Subscription nodes (mihomo; empty under sing-box), shared with the node page.
+    loadPool()
   ])
   if (nodeList.status === 'fulfilled') nodes.value = nodeList.value.nodes
   if (groupList.status === 'fulfilled') {
@@ -114,6 +116,7 @@ const names = computed(() => {
     ['block', '拒绝']
   ])
   for (const node of nodes.value) map.set(node.id, node.name)
+  for (const node of poolNodes.value) map.set(node.id, node.name)
   for (const group of groups.value) map.set(group.id, group.name)
   return map
 })
@@ -129,11 +132,19 @@ function endNode(id: string | undefined): string | undefined {
   }
   return current
 }
-const delayOf = (id: string | undefined) => (id ? runtime.value?.nodes[id] : undefined)
+/** A node's last test; a subscription node's comes from the pool (`alive: false`: it failed). */
+function delayOf(id: string | undefined) {
+  if (!id) return undefined
+  if (isPoolNode(id)) {
+    const node = poolNodes.value.find((item) => item.id === id)
+    return node ? { delay: node.alive === false ? null : (node.delay ?? null), time: node.alive === false ? 'failed' : null } : undefined
+  }
+  return runtime.value?.nodes[id]
+}
 
 const nodeStats = computed(() => {
   const stats = { ok: 0, warn: 0, bad: 0, idle: 0 }
-  for (const node of nodes.value) {
+  for (const node of [...nodes.value, ...poolNodes.value]) {
     const test = delayOf(node.id)
     stats[latency(test?.delay, test?.time)]++
   }
@@ -251,7 +262,7 @@ async function reapply() {
         <span class="sp"></span>
         <RouterLink class="btn sm ghost" to="/nodes">查看 →</RouterLink>
       </div>
-      <div class="big">{{ nodes.length }}</div>
+      <div class="big">{{ nodes.length + poolNodes.length }}</div>
       <div v-if="!runtime" class="t2" style="margin-top: 6px">延迟不可用</div>
       <div v-else class="row" style="margin-top: 6px">
         <span class="pill ok">正常 {{ nodeStats.ok }}</span>

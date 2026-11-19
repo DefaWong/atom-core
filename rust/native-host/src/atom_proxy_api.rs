@@ -608,10 +608,23 @@ async fn with_clash<T: Send + 'static>(
     .unwrap_or_else(|e| Err(error(502, format!("任务异常结束: {e}"))))
 }
 
+/// The delay of one entry of a Clash API `history` (`{time, delay}`), or
+/// `None` for a failed test. sing-box drops a node's history when a test
+/// fails, so any entry it keeps is a success (0 ms included). mihomo keeps
+/// failed tests in the history with `delay: 0` (and `alive: false`), so
+/// there 0 is a failure, not a 0 ms answer.
+fn test_delay(backend: crate::atom_proxy::Backend, sample: &Value) -> Option<Value> {
+    let delay = sample.get("delay")?;
+    if backend == crate::atom_proxy::Backend::Mihomo && delay.as_u64() == Some(0) {
+        return None;
+    }
+    Some(delay.clone())
+}
+
 /// `GET runtime`: what sing-box chose and measured. `groups`: the current
 /// member of every group and Final (an automatic group's choice included);
 /// `nodes`: each node's latest delay test (`delay` null: none, or it
-/// failed). The Clash API's answer is read and reduced on the blocking pool.
+/// failed; see [`test_delay`]). The Clash API's answer is read and reduced on the blocking pool.
 async fn runtime(rules: &AtomRules) -> Answer {
     let current = state(rules);
     let group_ids: Vec<(String, bool)> = current
@@ -641,11 +654,9 @@ async fn runtime(rules: &AtomRules) -> Answer {
             let last = entry(&id)
                 .and_then(|p| p.get("history"))
                 .and_then(Value::as_array)
-                // A failed test removes the history: any entry is a success
-                // (0 ms included).
                 .and_then(|history| history.last());
             let view = json!({
-                "delay": last.and_then(|last| last.get("delay")),
+                "delay": last.and_then(|last| test_delay(host.backend, last)),
                 "time": last.and_then(|last| last.get("time")),
             });
             nodes.insert(id, view);
@@ -975,7 +986,7 @@ async fn providers(
                         let last = node["history"].as_array().and_then(|history| history.last());
                         nodes.push(json!({
                             "id": tag, "name": short, "type": node["type"], "alive": node["alive"],
-                            "delay": last.and_then(|sample| sample.get("delay")),
+                            "delay": last.and_then(|sample| test_delay(Backend::Mihomo, sample)),
                             "provider_id": id, "provider_name": name,
                         }));
                     }
@@ -1133,7 +1144,7 @@ async fn providers(
                     let name = tag.strip_prefix(&prefix)?;
                     let last = node["history"].as_array().and_then(|history| history.last());
                     Some(json!({"id":tag, "name":name, "type":node["type"], "alive":node["alive"],
-                        "delay":last.and_then(|sample| sample.get("delay"))}))
+                        "delay":last.and_then(|sample| test_delay(Backend::Mihomo, sample))}))
                 }).collect();
                 Ok(json!({"id":id, "active":true, "updated_at":value["updatedAt"], "nodes":nodes}))
             }).await?;
