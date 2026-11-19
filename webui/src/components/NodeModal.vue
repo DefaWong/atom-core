@@ -43,31 +43,42 @@ const base = ref<Node | undefined>(props.node)
 const original = ref('')
 const loading = ref(false)
 
-async function loadContent(id: string) {
+async function fetchContent(id: string) {
   loading.value = true
   try {
-    const text = await nodeText(id)
-    form.format = text.format
-    form.content = text.content
-    original.value = text.content
+    return await nodeText(id)
   } catch (failure) {
     error.value = describe(failure)
+    return undefined
   } finally {
     loading.value = false
   }
 }
-onMounted(() => {
-  if (props.node) void loadContent(props.node.id)
+function useContent(text: { format: Format; content: string }) {
+  form.format = text.format
+  form.content = text.content
+  original.value = text.content
+}
+onMounted(async () => {
+  if (!props.node) return
+  const text = await fetchContent(props.node.id)
+  if (text) useContent(text)
 })
 
-/** Drops the edits and starts again from the node as saved now. */
-function reload(current: Node) {
+/**
+ * Drops the edits and starts again from the node as saved now. Until its content is read, the
+ * conflict stays (the old draft cannot be saved over the newer node).
+ */
+async function reload(current: Node) {
+  const at = version.value
+  error.value = ''
+  const text = await fetchContent(current.id)
+  if (!text) return
+  useContent(text)
   base.value = current
   form.name = current.name
-  formVersion.value = version.value
+  formVersion.value = at
   conflict.value = undefined
-  error.value = ''
-  void loadContent(current.id)
 }
 const joinTargets = computed(() => [...groups.value.map((group) => ({ id: group.id, name: group.name })), { id: FINAL, name: FINAL_NAME }])
 const formatName = computed(() => formats.find((item) => item[0] === form.format)?.[1] ?? '')
@@ -195,7 +206,7 @@ async function submit(overwrite = false) {
     <div v-if="error" class="err">{{ error }}</div>
     <template #footer>
       <template v-if="conflict">
-        <button class="btn" type="button" @click="reload(conflict)">载入最新内容</button>
+        <button class="btn" type="button" :disabled="loading" @click="reload(conflict)">载入最新内容</button>
         <button class="btn red" type="button" :disabled="busy" @click="submit(true)">仍然保存</button>
       </template>
       <template v-else>

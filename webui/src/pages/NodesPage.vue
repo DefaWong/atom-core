@@ -215,7 +215,7 @@ async function refreshProvider(provider: Provider) {
   try {
     await call(client.POST('/providers/{id}/refresh', { params: { path: { id: provider.id } } }))
   } catch (failure) {
-    toast('bad', `${provider.name}：${describe(failure)}`, 5000)
+    toast('bad', `${provider.name}：${describe(failure)}`)
   } finally {
     delete refreshing.value[provider.id]
   }

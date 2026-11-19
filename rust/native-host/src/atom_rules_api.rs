@@ -80,9 +80,9 @@ pub(crate) fn mutates(method: &str, path: &str) -> bool {
         let decoded = path_segments(rest);
         let segments: Vec<&str> = decoded.iter().map(String::as_str).collect();
         matches!(method, "POST" | "PUT" | "DELETE")
-            && rest != "rules/test"
-            && rest != "rules/dryrun"
-            && !(method == "PUT" && rest == "settings")
+            && segments != ["rules", "test"]
+            && segments != ["rules", "dryrun"]
+            && !(method == "PUT" && segments == ["settings"])
             && !crate::atom_dns_api::applies_settings(method, &segments)
     })
 }
@@ -1123,7 +1123,7 @@ async fn fetch_converted(
     category: String,
     shutdown: &TransportCancellation,
 ) -> Result<crate::atom_rules::Converted, String> {
-    let fetched = crate::rule_download::fetch(
+    let fetched = crate::rule_download::fetch_or_direct(
         crate::rule_download::Fetch {
             url: &url,
             socks5: &rules.socks5,

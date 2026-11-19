@@ -77,13 +77,16 @@ pub(crate) async fn fetch(
     if status == 200 {
         Ok(body)
     } else {
-        Err(format!("bad status: {status}"))
+        Err(format!("{BAD_STATUS}{status}"))
     }
 }
 
-/// [`fetch`] through `fetch.socks5`, then once more directly when that
-/// fails (the proxy may have no working node); a direct fetch is tried once.
-/// Both failures are in the error.
+const BAD_STATUS: &str = "bad status: ";
+
+/// [`fetch`] through `fetch.socks5`, then once more directly when the proxy
+/// itself failed (it may have no working node); a reply from the server (a
+/// bad status) is not retried, and a direct fetch is tried once. Both
+/// failures are in the error.
 pub(crate) async fn fetch_or_direct(
     fetch_args: Fetch<'_>,
     cancel: &TransportCancellation,
@@ -99,6 +102,7 @@ pub(crate) async fn fetch_or_direct(
     match fetch(fetch_args, cancel).await {
         Ok(bytes) => Ok(bytes),
         Err(_) if cancel.is_cancelled() => Err("canceled by shutdown".to_owned()),
+        Err(status) if status.starts_with(BAD_STATUS) => Err(status),
         Err(proxied) => fetch(direct, cancel)
             .await
             .map_err(|direct| format!("经代理: {proxied}；直连: {direct}")),

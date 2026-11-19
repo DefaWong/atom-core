@@ -100,7 +100,7 @@ pub(crate) async fn handle(
         ("GET", ["learning"]) => learning_view(config).await,
         ("POST", ["learning", key, "flush"]) => flush_learning(config, key).await,
         ("GET", ["requery"]) => requery_view(config).await,
-        ("PUT", ["requery"]) => put_requery(config, body).await,
+        ("PUT", ["requery"]) => put_requery(control, config, body).await,
         ("POST", ["requery", "trigger"]) => trigger(config).await,
         (_, ["dns" | "upstreams" | "rewrite", ..])
         | (_, ["caches" | "learning" | "requery"])
@@ -453,6 +453,13 @@ async fn put_dns(control: &RuntimeControl, body: &[u8]) -> Reply {
         Err(reply) => return reply,
     };
     let learning_changed = patch.contains_key("learning");
+    // The `no_v4` lifetime is checked against the requery schedule: hold the
+    // schedule's writes from the check until the settings are applied.
+    let _schedule = if learning_changed {
+        Some(requery_writes().lock().await)
+    } else {
+        None
+    };
     let current = control.view();
     let DnsChange {
         settings,
@@ -514,7 +521,45 @@ async fn put_dns(control: &RuntimeControl, body: &[u8]) -> Reply {
 /// "No IPv4" is learned only by the periodic re-query: while that runs, a
 /// name must outlive the interval, or it is gone before the next run can
 /// confirm it. Checked on the settings a `PUT dns` would publish.
+/// Whether `no_v4` learns (the learning switch and its own).
+fn no_v4_learning(config: &CompiledConfig, settings: &Settings) -> bool {
+    settings.domain_generation.enabled.unwrap_or(true)
+        && settings
+            .domain_generation
+            .plugins
+            .get(NO_V4)
+            .map(|switch| switch.enabled)
+            .or_else(|| config.yaml_defaults.generation.get(NO_V4).copied())
+            .unwrap_or(true)
+}
+
 async fn check_no_v4_ttl(config: &CompiledConfig, settings: &Settings) -> Result<(), String> {
+    let Ok(requery) = requery_of(config) else {
+        return Ok(());
+    };
+    let Ok(schedule) = requery_config(requery).await else {
+        return Ok(());
+    };
+    let scheduler = &schedule["scheduler"];
+    no_v4_outlives(
+        config,
+        settings,
+        scheduler["enabled"].as_bool().unwrap_or(false),
+        scheduler["interval_minutes"].as_u64().unwrap_or(0),
+    )
+}
+
+/// The `no_v4` lifetime against a requery schedule (`enabled`, every
+/// `minutes`).
+fn no_v4_outlives(
+    config: &CompiledConfig,
+    settings: &Settings,
+    enabled: bool,
+    minutes: u64,
+) -> Result<(), String> {
+    if !enabled || minutes == 0 || !no_v4_learning(config, settings) {
+        return Ok(());
+    }
     let Some((_, yaml)) = config
         .yaml_defaults
         .categories
@@ -523,28 +568,6 @@ async fn check_no_v4_ttl(config: &CompiledConfig, settings: &Settings) -> Result
     else {
         return Ok(());
     };
-    let learning_on = settings.domain_generation.enabled.unwrap_or(true)
-        && settings
-            .domain_generation
-            .plugins
-            .get(NO_V4)
-            .map(|switch| switch.enabled)
-            .or_else(|| config.yaml_defaults.generation.get(NO_V4).copied())
-            .unwrap_or(true);
-    if !learning_on {
-        return Ok(());
-    }
-    let Ok(requery) = requery_of(config) else {
-        return Ok(());
-    };
-    let Ok(schedule) = requery_config(requery).await else {
-        return Ok(());
-    };
-    let scheduler = &schedule["scheduler"];
-    let minutes = scheduler["interval_minutes"].as_u64().unwrap_or(0);
-    if !scheduler["enabled"].as_bool().unwrap_or(false) || minutes == 0 {
-        return Ok(());
-    }
     let ttl = settings
         .learning
         .categories
@@ -1051,15 +1074,20 @@ async fn requery_view(config: &CompiledConfig) -> Reply {
     }
 }
 
-/// Serializes `PUT requery` (read, merge, store).
+/// Serializes `PUT requery` (read, merge, store), and a learning change in
+/// `PUT dns` with it.
 static REQUERY_WRITES: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+fn requery_writes() -> &'static tokio::sync::Mutex<()> {
+    REQUERY_WRITES.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 /// The longest interval `PUT requery` takes: a year.
 const MAX_INTERVAL_MINUTES: i64 = 525_600;
 
 /// `PUT requery {enabled?, interval_minutes?}`: the schedule. Turning it on
 /// without a start time starts the count now.
-async fn put_requery(config: &CompiledConfig, body: &[u8]) -> Reply {
+async fn put_requery(control: Option<&RuntimeControl>, config: &CompiledConfig, body: &[u8]) -> Reply {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Payload {
@@ -1083,10 +1111,7 @@ async fn put_requery(config: &CompiledConfig, body: &[u8]) -> Reply {
     // plugin changes its configuration before writing it and puts the old
     // one back when the write fails, so an interleaved change could read a
     // value that is then undone, or be undone itself.
-    let _one = REQUERY_WRITES
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .lock()
-        .await;
+    let _one = requery_writes().lock().await;
     let current = match requery_config(requery).await {
         Ok(value) => value,
         Err(reply) => return reply,
@@ -1100,6 +1125,15 @@ async fn put_requery(config: &CompiledConfig, body: &[u8]) -> Reply {
         .unwrap_or_else(|| scheduler["interval_minutes"].as_i64().unwrap_or(0));
     if enabled && interval <= 0 {
         return error(400, "开启定期刷新要先设好间隔");
+    }
+    // The settings as published now (`put_dns` holds this lock until its
+    // learning change is applied).
+    let view = control.map(RuntimeControl::view);
+    let settings = view.as_ref().map_or(&config.settings, |view| &view.config.settings);
+    if let Err(reason) =
+        no_v4_outlives(config, settings, enabled, u64::try_from(interval).unwrap_or(0))
+    {
+        return error(400, reason);
     }
     let mut start = scheduler["start_datetime"].as_str().unwrap_or("").to_owned();
     if start.is_empty() {

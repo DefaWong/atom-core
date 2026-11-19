@@ -4392,16 +4392,28 @@ components:
           type: boolean
         limits:
           type: object
-          additionalProperties:
-            type: object
-            additionalProperties: false
-            properties:
-              max_entries:
-                type: integer
-                minimum: 1
-              ttl_seconds:
-                type: integer
-                minimum: 60
+          additionalProperties: false
+          properties:
+            remember_direct:
+              $ref: "#/components/schemas/LearningLimit"
+            remember_proxy:
+              $ref: "#/components/schemas/LearningLimit"
+            no_v4:
+              $ref: "#/components/schemas/LearningLimit"
+            no_v6:
+              $ref: "#/components/schemas/LearningLimit"
+    LearningLimit:
+      type: object
+      additionalProperties: false
+      properties:
+        max_entries:
+          type: integer
+          minimum: 1
+          maximum: 262144
+        ttl_seconds:
+          type: integer
+          minimum: 60
+          maximum: 315360000
     Dns:
       allOf:
         - $ref: "#/components/schemas/DnsPatch"

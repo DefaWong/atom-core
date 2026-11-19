@@ -1001,6 +1001,12 @@ fn learning_limits_are_saved_and_no_v4_outlives_the_requery_interval() {
     let (status, value) = host.call("PUT", "dns", &json!({"learning": {"limits": {"no_v4": {"ttl_seconds": 3660}}}}));
     assert_eq!(status, 200, "{value}");
     assert_eq!(category("no_v4")["ttl_seconds"], 3660);
+    // The schedule is held to the lifetime too: 61 minutes is not shorter.
+    let (status, value) = host.call("PUT", "requery", &json!({"interval_minutes": 61}));
+    assert_eq!(status, 400, "{value}");
+    assert!(value["error"].as_str().unwrap().contains("记忆无 V4"), "{value}");
+    let (status, value) = host.call("PUT", "requery", &json!({"interval_minutes": 30}));
+    assert_eq!(status, 200, "{value}");
     // With "no IPv4" off, its lifetime is not checked.
     let (status, value) = host.call("PUT", "dns", &json!({"learning": {"no_v4": false, "limits": {"no_v4": {"ttl_seconds": 600}}}}));
     assert_eq!(status, 200, "{value}");

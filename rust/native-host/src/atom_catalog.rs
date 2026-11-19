@@ -208,7 +208,7 @@ struct TreeEntry {
 
 async fn tree(url: &str, socks5: &str) -> Result<Tree, String> {
     let shutdown = atomdns_upstream_core::TransportCancellation::new();
-    let bytes = crate::rule_download::fetch(
+    let bytes = crate::rule_download::fetch_or_direct(
         crate::rule_download::Fetch {
             url,
             socks5,

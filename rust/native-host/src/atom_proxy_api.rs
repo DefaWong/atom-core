@@ -331,8 +331,17 @@ pub(crate) fn export_node(state: &ProxyState, id: &str, query: Option<&str>) -> 
             return Err(error(500, "节点转换结果不是映射"));
         };
         proxy.insert("name".into(), json!(node.name));
-        yaml_serde::to_string(&ordered(&proxy, &["name", "type", "server", "port"]))
-            .map_err(|e| error(500, format!("YAML 生成失败: {e}")))?
+        let text = yaml_serde::to_string(&ordered(&proxy, &["name", "type", "server", "port"]))
+            .map_err(|e| error(500, format!("YAML 生成失败: {e}")))?;
+        // Saved back, the text replaces the whole connection: offer it only
+        // when it reads back as the same outbound.
+        let back = crate::atom_links::from_clash_yaml(&text).ok();
+        if back.as_deref().map(|nodes| nodes.iter().map(|n| &n.1).collect::<Vec<_>>())
+            != Some(vec![&node.outbound])
+        {
+            return Err(error(422, "这个节点的 Clash YAML 不能完整表示，请用 JSON 编辑"));
+        }
+        text
     } else {
         let mut outbound = node.outbound.clone();
         outbound.insert("tag".into(), json!(node.name));
@@ -1467,7 +1476,12 @@ pub(crate) async fn handle(
             .map_err(|e| fail(&e)),
         _ => Err(error(405, "method not allowed")),
     };
-    answer.unwrap_or_else(|reply| reply)
+    let mut reply = answer.unwrap_or_else(|reply| reply);
+    // Node replies carry the credentials.
+    if segments.first() == Some(&"nodes") {
+        reply.headers.push(("Cache-Control", "no-store".to_owned()));
+    }
+    reply
 }
 
 #[cfg(test)]

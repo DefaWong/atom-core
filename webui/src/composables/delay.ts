@@ -16,7 +16,7 @@ export async function testNode(id: string, key = id) {
     // Only sing-box's own answer that the test failed (502 `测速失败（503/504）…`) is a failed
     // node; atomdns or sing-box not answering says nothing about the node.
     if (error instanceof ApiError && error.status === 502 && error.message.startsWith('测速失败')) recordDelay(id, null)
-    toast('bad', describe(error), 5000)
+    toast('bad', describe(error))
   } finally {
     delete testing[key]
   }
@@ -35,7 +35,7 @@ export async function testPoolNode(id: string) {
       const node = poolNodes.value.find((item) => item.id === id)
       if (node) Object.assign(node, { delay: null, alive: false })
     }
-    toast('bad', describe(error), 5000)
+    toast('bad', describe(error))
   } finally {
     delete testing[id]
     await loadPool()
@@ -54,7 +54,7 @@ export async function testGroup(id: string) {
     const members = id === FINAL ? (final.value?.members ?? []) : (groups.value.find((group) => group.id === id)?.members ?? [])
     for (const member of members) if (!isGroup(member)) recordDelay(member, delays[member] ?? null)
   } catch (error) {
-    toast('bad', describe(error), 5000)
+    toast('bad', describe(error))
   } finally {
     await loadRuntime()
     delete testing[key]

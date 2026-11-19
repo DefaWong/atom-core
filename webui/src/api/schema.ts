@@ -2210,11 +2210,15 @@ export interface components {
             no_v4?: boolean;
             no_v6?: boolean;
             limits?: {
-                [key: string]: {
-                    max_entries?: number;
-                    ttl_seconds?: number;
-                };
+                remember_direct?: components["schemas"]["LearningLimit"];
+                remember_proxy?: components["schemas"]["LearningLimit"];
+                no_v4?: components["schemas"]["LearningLimit"];
+                no_v6?: components["schemas"]["LearningLimit"];
             };
+        };
+        LearningLimit: {
+            max_entries?: number;
+            ttl_seconds?: number;
         };
         Dns: components["schemas"]["DnsPatch"] & Record<string, never>;
         /** @description One upstream (more fields of AtomDNS's upstream entry are accepted and returned). */

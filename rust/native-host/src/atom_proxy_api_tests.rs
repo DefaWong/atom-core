@@ -90,6 +90,20 @@ plugins:
             .map_err(|error| format!("{error:?}"))
     }
 
+    fn reply(&self, method: &str, target: &str) -> crate::rule_sources::Reply {
+        self.assembly
+            .block_on(crate::atom_rules_api::handle(
+                None,
+                self.assembly.config(),
+                self.assembly.cache(),
+                method,
+                target,
+                b"",
+                &TransportCancellation::new(),
+            ))
+            .expect("an atom route")
+    }
+
     fn call(&self, method: &str, target: &str, body: &str) -> (u16, Value) {
         let reply = self
             .assembly
@@ -685,6 +699,8 @@ fn an_exported_node_saves_back_unchanged() {
     let hk = imported["nodes"][0]["id"].as_str().unwrap().to_owned();
     let before = api.outbound(&hk);
 
+    let reply = api.reply("GET", &format!("/api/v1/atom/nodes/{hk}/export"));
+    assert!(reply.headers.contains(&("Cache-Control", "no-store".to_owned())));
     let (status, json_text) = api.call("GET", &format!("/api/v1/atom/nodes/{hk}/export"), "");
     assert_eq!(status, 200, "{json_text}");
     assert_eq!(json_text["format"], "json", "sing-box is the default kernel");
@@ -704,6 +720,35 @@ fn an_exported_node_saves_back_unchanged() {
         assert_eq!(status, 200, "{saved}");
         assert_eq!(saved["node"]["name"], "香港");
         assert_eq!(api.outbound(&hk), before, "{}", text["format"]);
+    }
+
+    // Hysteria2 bandwidth and a VLESS packet encoding come back from YAML; a
+    // node the YAML cannot carry whole is offered only as JSON.
+    let nodes = serde_json::json!([
+        {"tag": "hy", "type": "hysteria2", "server": "h.example", "server_port": 443,
+         "password": "p", "up_mbps": 50, "down_mbps": 200,
+         "tls": {"enabled": true, "server_name": "h.example"}},
+        {"tag": "vl", "type": "vless", "server": "v.example", "server_port": 443,
+         "uuid": "9b1c2e4a-0000-4000-8000-000000000001", "packet_encoding": "packetaddr"},
+        {"tag": "bare", "type": "vless", "server": "b.example", "server_port": 443,
+         "uuid": "9b1c2e4a-0000-4000-8000-000000000002"}
+    ]);
+    let body = serde_json::json!({"format": "json", "content": nodes.to_string()});
+    let (status, imported) = api.call("POST", "/api/v1/atom/nodes", &body.to_string());
+    assert_eq!(status, 201, "{imported}");
+    for (index, round_trips) in [(0, true), (1, true), (2, false)] {
+        let id = imported["nodes"][index]["id"].as_str().unwrap().to_owned();
+        let before = api.outbound(&id);
+        let (status, text) = api.call("GET", &format!("/api/v1/atom/nodes/{id}/export?format=yaml"), "");
+        if !round_trips {
+            assert_eq!(status, 422, "{text}");
+            continue;
+        }
+        assert_eq!(status, 200, "{text}");
+        let body = serde_json::json!({"format": "yaml", "content": text["content"]});
+        let (status, saved) = api.call("PUT", &format!("/api/v1/atom/nodes/{id}"), &body.to_string());
+        assert_eq!(status, 200, "{saved}");
+        assert_eq!(api.outbound(&id), before, "{}", text["content"]);
     }
 
     let (status, _) = api.call("GET", &format!("/api/v1/atom/nodes/{hk}/export?format=link"), "");
