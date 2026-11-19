@@ -51,8 +51,10 @@ function setTopology() {
 }
 
 const networkBusy = ref(false)
+// Read-only in the container version, and until the overview says which version this is.
+const readOnly = computed(() => !maintenance.value || containerDeployment.value)
 async function saveNetwork() {
-  if (!view.value || !form.value || networkBusy.value) return
+  if (!view.value || !form.value || networkBusy.value || readOnly.value) return
   networkError.value = ''
   networkBusy.value = true
   try {
@@ -88,7 +90,7 @@ async function confirmNetwork() {
     <div class="hd" style="margin: 0">
       <h2>网络</h2>
       <span class="sp"></span>
-      <button v-if="form && !containerDeployment" type="submit" class="btn pri sm" :disabled="!networkChanged || networkBusy || maintenanceBusy">试用并保存</button>
+      <button v-if="form && !readOnly" type="submit" class="btn pri sm" :disabled="!networkChanged || networkBusy || maintenanceBusy">试用并保存</button>
     </div>
     <div v-if="networkJob" class="grid" style="gap: 7px" aria-live="polite">
       <div>{{ phaseLabels[networkJob.phase] }}</div>
@@ -110,7 +112,7 @@ async function confirmNetwork() {
       <button v-if="!maintenanceBusy" type="button" class="btn sm" @click="loadNetwork">重新读取</button>
     </div>
 
-    <fieldset v-if="form && view" :disabled="containerDeployment || networkBusy || maintenanceBusy" class="network-fields grid">
+    <fieldset v-if="form && view" :disabled="readOnly || networkBusy || maintenanceBusy" class="network-fields grid">
       <div class="field">
         <label for="atom-topology">拓扑</label>
         <select id="atom-topology" v-model="form.topology" class="inp" @change="setTopology">

@@ -38,7 +38,7 @@ async function update(kind: 'check' | 'upgrade') {
       <span v-if="maintenance" class="mono">Atom v{{ maintenance.version }}</span>
     </div>
     <div v-if="maintenance && !maintenance.online && !containerDeployment" class="t2">当前安装包未配置在线升级。</div>
-    <div v-if="updateJob" aria-live="polite">
+    <div v-if="updateJob && !containerDeployment" aria-live="polite">
       <div v-if="latest">可升级至 Atom v{{ latest }}</div>
       <div v-else-if="updateJob.kind === 'check' && updateJob.phase === 'success'">未发现可升级版本</div>
       <div v-else>{{ phaseLabels[updateJob.phase] }}<span v-if="updateJob.version"> · Atom v{{ updateJob.version }}</span></div>
@@ -49,7 +49,7 @@ async function update(kind: 'check' | 'upgrade') {
     <div v-else-if="maintenanceError" :class="maintenanceBusy ? 't2' : 'err'">
       {{ maintenanceBusy ? '正在重新连接面板…' : maintenanceError }}
     </div>
-    <div v-if="maintenance?.online" class="row">
+    <div v-if="maintenance?.online && !containerDeployment" class="row">
       <button type="button" class="btn" :disabled="checking || maintenanceBusy" @click="update('check')">检查更新</button>
       <a v-if="latestNotes" class="btn" :href="latestNotes" target="_blank" rel="noopener noreferrer">发布说明</a>
       <button v-if="latest" type="button" class="btn pri" :disabled="checking || maintenanceBusy" @click="update('upgrade')">升级 Atom</button>
