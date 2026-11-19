@@ -212,7 +212,7 @@ export function delayOf(id: string | undefined) {
   const leaf = leafOf(id)
   if (leaf && isPoolNode(leaf)) {
     const node = poolNodes.value.find((item) => item.id === leaf)
-    return node ? { delay: node.delay ?? null, time: node.alive === false ? '1970-01-01T00:00:00Z' : null } : undefined
+    return node ? { delay: node.alive === false ? null : (node.delay ?? null), time: node.alive === false ? '1970-01-01T00:00:00Z' : null } : undefined
   }
   return leaf ? runtime.value?.nodes[leaf] : undefined
 }

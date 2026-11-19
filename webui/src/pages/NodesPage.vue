@@ -54,7 +54,8 @@ function itemOf(node: Node): Item {
   }
 }
 function itemOfPool(node: (typeof poolNodes.value)[number]): Item {
-  const delay = node.delay ?? null
+  // mihomo keeps a failed test as `delay: 0` with `alive: false`.
+  const delay = node.alive === false ? null : (node.delay ?? null)
   const kind = latency(delay, node.alive === false ? 'x' : null)
   return {
     id: node.id, name: node.name, type: (node.type ?? '').toUpperCase(), source: node.provider_id, sourceName: node.provider_name, addr: '',
