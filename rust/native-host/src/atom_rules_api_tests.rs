@@ -1,6 +1,6 @@
 use atomdns_upstream_core::TransportCancellation;
 
-use super::{handle, mutates};
+use super::{handle, mutates, path_segments};
 use crate::assembly::{HostAssembly, HostOptions};
 
 const YAML: &str = r"log: {level: error}
@@ -462,4 +462,127 @@ fn builtin_sets_are_removed_and_confirmed_deletions_edit_the_rules() {
     assert_eq!(api.call("DELETE", &format!("/api/v1/atom/rulesets/{id}"), "").0, 409);
     assert_eq!(api.call("DELETE", &format!("/api/v1/atom/rulesets/{id}?confirm=true"), "").0, 200);
     assert_eq!(api.call("GET", &format!("/api/v1/atom/rulesets/{id}"), "").0, 404);
+}
+
+#[test]
+fn path_segments_are_decoded_after_the_split() {
+    let segments = |path: &str| path_segments(path).unwrap();
+    assert_eq!(segments("rulesets/bm7%3AClaude/refresh"), ["rulesets", "bm7:Claude", "refresh"]);
+    // A decoded `/` stays inside its segment; `+` is itself in a path.
+    assert_eq!(segments("rulesets/a%2Fb+c"), ["rulesets", "a/b+c"]);
+    assert_eq!(segments("upstreams/%E5%9B%BD%E5%86%85"), ["upstreams", "国内"]);
+    assert_eq!(segments("upstreams/%EF%BF%BD"), ["upstreams", "\u{fffd}"]);
+    // Not UTF-8, or a broken escape: refused.
+    assert_eq!(path_segments("upstreams/%FF"), None);
+    assert_eq!(path_segments("upstreams/a%2"), None);
+    // The lease decision reads the same decoded segments as the dispatch: an
+    // encoded `settings` still takes no outer lease.
+    assert!(!mutates("PUT", "/api/v1/atom/%73ettings"));
+    assert!(!mutates("POST", "/api/v1/atom/rules/%74est"));
+    assert!(mutates("PUT", "/api/v1/atom/rulesets/bm7%3AClaude"));
+    assert!(!mutates("PUT", "/api/v1/atom/rulesets/corp%FF"));
+}
+
+/// A plain HTTP server for downloads: `/list.txt` is a domain list, anything
+/// else 404.
+fn serve_lists() -> u16 {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut request = [0u8; 2048];
+            let read = stream.read(&mut request).unwrap_or(0);
+            let head = String::from_utf8_lossy(&request[..read]);
+            let reply = if head.starts_with("GET /list.txt ") {
+                let body = "a.example\nb.example\n";
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+            } else {
+                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
+            };
+            let _ = stream.write_all(reply.as_bytes());
+        }
+    });
+    port
+}
+
+/// A builtin set with one source: its auto-update settings are edited and
+/// saved in the manifest; a download through a proxy that does not answer is
+/// tried directly; a failed one names its reason.
+#[test]
+fn builtin_sources_are_edited_and_downloads_fall_back_to_direct() {
+    let port = serve_lists();
+    let root = scratch("builtin-source");
+    std::fs::create_dir_all(root.join("srs")).unwrap();
+    std::fs::write(
+        root.join("srs/cn.json"),
+        format!(
+            r#"[{{"name": "cn", "type": "geositecn", "files": "srs/cn.txt", "url": "http://127.0.0.1:{port}/list.txt", "format": "text", "enabled": true, "auto_update": false, "update_interval_hours": 24}}]"#
+        ),
+    )
+    .unwrap();
+    let with_proxy = |proxy: &str| {
+        YAML.replace(
+            "  - tag: domestic\n",
+            // Port 1 refuses: the proxy is down.
+            &format!("  - tag: main_proxy\n    type: socks5_proxy\n    args: {{addr: '127.0.0.1:1'}}\n  - tag: cn_sites\n    type: sd_set_light\n    args: {{{proxy}, local_config: 'srs/cn.json'}}\n  - tag: unified\n    type: domain_mapper\n    args: {{rules: [{{tag: cn_sites, mark: 9, output_tag: cn}}]}}\n  - tag: domestic\n"),
+        )
+        .replace("      builtin: [blocked]\n", "      mapper: unified\n      builtin: [blocked, cn_sites]\n")
+    };
+    // A proxy of its own is not `main_proxy`: its failure is the answer.
+    {
+        let own = scratch("builtin-source-own-proxy");
+        std::fs::create_dir_all(own.join("srs")).unwrap();
+        std::fs::copy(root.join("srs/cn.json"), own.join("srs/cn.json")).unwrap();
+        let config = crate::config::compile_yaml_with_base(&with_proxy("socks5: '127.0.0.1:1'"), &own).expect("config");
+        let assembly = HostAssembly::with_options(config, HostOptions::default()).unwrap();
+        let api = Api { assembly, root: own };
+        let (status, failed) = api.call("POST", "/api/v1/atom/rulesets/cn_sites/refresh", "");
+        assert_eq!(status, 502, "{failed}");
+        assert!(!failed["error"].as_str().unwrap().contains("直连"), "{failed}");
+        assert!(!api.root.join("srs/cn.txt").exists());
+    }
+    let config = crate::config::compile_yaml_with_base(&with_proxy("proxy: $main_proxy"), &root).expect("config");
+    let assembly = HostAssembly::with_options(config, HostOptions::default()).unwrap();
+    let api = Api { assembly, root };
+
+    let view = || {
+        let (_, sets) = api.call("GET", "/api/v1/atom/rulesets", "");
+        sets.as_array().unwrap().iter().find(|s| s["id"] == "cn_sites").cloned().unwrap()
+    };
+    assert_eq!((&view()["auto_update"], &view()["update_interval_hours"]), (&serde_json::json!(false), &serde_json::json!(24)));
+
+    let (status, edited) = api.call(
+        "PUT",
+        "/api/v1/atom/rulesets/cn_sites",
+        r#"{"auto_update": true, "update_interval_hours": 6}"#,
+    );
+    assert_eq!(status, 200, "{edited}");
+    assert_eq!((&edited["auto_update"], &edited["update_interval_hours"]), (&serde_json::json!(true), &serde_json::json!(6)));
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(api.root.join("srs/cn.json")).unwrap()).unwrap();
+    assert_eq!((&manifest[0]["auto_update"], &manifest[0]["update_interval_hours"]), (&serde_json::json!(true), &serde_json::json!(6)));
+    assert!(!api.root.join("srs/cn.txt").exists(), "no new address: nothing downloaded");
+    for hours in [0, 8761] {
+        let body = format!(r#"{{"update_interval_hours": {hours}}}"#);
+        assert_eq!(api.call("PUT", "/api/v1/atom/rulesets/cn_sites", &body).0, 400, "{hours}");
+    }
+
+    let (status, refreshed) = api.call("POST", "/api/v1/atom/rulesets/cn_sites/refresh", "");
+    assert_eq!(status, 200, "{refreshed}");
+    assert_eq!(refreshed["updated"], 1, "the direct retry downloaded it: {refreshed}");
+    assert!(api.root.join("srs/cn.txt").exists());
+
+    let missing = format!(r#"{{"url": "http://127.0.0.1:{port}/missing.txt"}}"#);
+    let (status, failed) = api.call("PUT", "/api/v1/atom/rulesets/cn_sites", &missing);
+    assert_eq!(status, 502, "{failed}");
+    let reason = failed["error"].as_str().unwrap();
+    assert!(reason.contains("经代理") && reason.contains("直连: bad status: 404"), "{reason}");
+    assert!(!reason.contains("见日志"), "{reason}");
+    let (status, failed) = api.call("POST", "/api/v1/atom/rulesets/cn_sites/refresh", "");
+    assert_eq!(status, 502, "{failed}");
+    assert!(failed["error"].as_str().unwrap().contains("cn: "), "{failed}");
+    assert_eq!(view()["url"], format!("http://127.0.0.1:{port}/missing.txt"), "the address is kept");
+    assert_eq!(api.call("GET", "/api/v1/atom/rulesets/cn_sites%FF", "").0, 400);
 }

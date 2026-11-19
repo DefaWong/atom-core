@@ -418,10 +418,12 @@ paths:
       description: |
         A custom ruleset: any of `name`, the source (`type` with its fields)
         and `rules` (local rulesets only); a catalog set cannot be changed
-        (400). A builtin set: only `{url}`, the download address of its one
-        source (409 for a set with several, such as `adguard`; 400 for one
-        without), downloaded at once (502 when that fails, the address is
-        kept and the old list stays).
+        (400). A builtin set: `url`, `auto_update` and `update_interval_hours`
+        (1 to 8760) of its one source (409 for a set with several, such as
+        `adguard`; 400 for one without); the automatic update follows the
+        saved settings. A new address is downloaded at once (502 with the
+        first failure's reason when that fails, the address is kept and the
+        old list stays).
       operationId: updateRuleset
       requestBody:
         required: true
@@ -445,6 +447,14 @@ paths:
                   type: array
                   items:
                     type: string
+                auto_update:
+                  type: boolean
+                  description: A builtin set only.
+                update_interval_hours:
+                  type: integer
+                  minimum: 1
+                  maximum: 8760
+                  description: A builtin set only.
       responses:
         "200":
           description: Changed.
@@ -518,8 +528,11 @@ paths:
 
         A builtin set (`refreshable: true`): every enabled source of it is
         downloaded again and the new lists are in use before the answer
-        (`RefreshResult`). When no source could be downloaded, 502 and the
-        old lists stay.
+        (`RefreshResult`). When no source could be downloaded, 502 with the
+        first failure's reason and the old lists stay. A download whose
+        connection through `main_proxy` fails (at the proxy itself) is tried
+        once more directly; a TLS error, a bad status or a body over the limit
+        is not.
       operationId: refreshRuleset
       responses:
         "200":
@@ -634,7 +647,7 @@ paths:
       operationId: listNodes
       responses:
         "200":
-          description: The nodes (credentials left out).
+          description: The nodes, credentials included.
           content:
             application/json:
               schema:
@@ -839,6 +852,47 @@ paths:
           $ref: "#/components/responses/Conflict"
         "502":
           $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /nodes/{id}/export:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [nodes]
+      summary: One node as text, to edit or copy
+      description: |
+        A sing-box outbound (JSON, `tag` is the name) or a Clash/mihomo proxy (YAML, `name`), as
+        `PUT /nodes/{id}` takes back in `format` and `content`. Without `format`, the active kernel's:
+        `yaml` for mihomo, `json` for sing-box.
+      operationId: exportNode
+      parameters:
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [json, yaml]
+      responses:
+        "200":
+          description: The node's text.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [format, content]
+                properties:
+                  format:
+                    type: string
+                    enum: [json, yaml]
+                  content:
+                    type: string
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          description: The node has no mihomo form (`yaml`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         default:
           $ref: "#/components/responses/Error"
   /nodes/{id}/delay:
@@ -1896,6 +1950,72 @@ paths:
           $ref: "#/components/responses/MaintenanceAccepted"
         default:
           $ref: "#/components/responses/Error"
+  /maintenance/services:
+    get:
+      tags: [maintenance]
+      summary: The state of Atom's services
+      description: |
+        The maintenance worker itself, AtomDNS and the proxy kernels installed (`atom-sing-box`,
+        `atom-mihomo`).
+      operationId: getAtomServices
+      responses:
+        "200":
+          description: The services.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [services]
+                properties:
+                  services:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, state]
+                      properties:
+                        name:
+                          type: string
+                          enum: [atom-maintenance, atom-dns, atom-sing-box, atom-mihomo]
+                        state:
+                          type: string
+                          enum: [running, stopped, failed, unknown]
+        default:
+          $ref: "#/components/responses/Error"
+  /maintenance/restart:
+    post:
+      tags: [maintenance]
+      summary: Restart one of Atom's services
+      description: |
+        The worker answers first, then restarts the service. Restarting `atom-dns` stops the panel
+        and DNS for a few seconds; an unknown service is refused (400).
+      operationId: restartAtomService
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [service]
+              additionalProperties: false
+              properties:
+                service:
+                  type: string
+                  enum: [atom-maintenance, atom-dns, atom-sing-box, atom-mihomo]
+      responses:
+        "202":
+          description: The restart will follow.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    type: boolean
+        "400":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
   /maintenance/confirm:
     post:
       tags: [maintenance]
@@ -2251,7 +2371,7 @@ paths:
   /stats/upstreams:
     get:
       tags: [state]
-      summary: Counters of every upstream since the process started
+      summary: Counters of every upstream since the process started or the latest stats/reset
       description: |
         By group in the configuration's order (the FakeIP group `nocnfake`
         too); only upstreams with a tag have counters. `errors` counts
@@ -2280,6 +2400,32 @@ paths:
                             $ref: "#/components/schemas/UpstreamStats"
         "404":
           $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /stats/reset:
+    post:
+      tags: [state]
+      summary: Set the cache and upstream counters back to zero
+      description: |
+        The named caches' `queries`, `hits` and `lazy_hits` (`GET caches`) and every upstream's
+        counters (`GET stats/upstreams`). Cached entries stay; the query log is cleared with
+        `POST audit/clear`.
+      operationId: resetStats
+      responses:
+        "200":
+          description: Reset.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    type: boolean
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
         "503":
           $ref: "#/components/responses/Error"
         default:
@@ -3796,6 +3942,12 @@ components:
         updated:
           type: string
           description: The last download (RFC 3339).
+        auto_update:
+          type: boolean
+          description: Downloaded again automatically, for a set with one source.
+        update_interval_hours:
+          type: integer
+          description: Hours between automatic downloads, for a set with one source.
         name:
           type: string
         type:
@@ -3919,6 +4071,9 @@ components:
         updated:
           type: integer
           description: Of those, the ones that replaced their list (a failed one is logged).
+        error:
+          type: string
+          description: The first failed source and why, when some failed.
     Node:
       type: object
       required: [id, name, outbound, groups]
@@ -3937,7 +4092,7 @@ components:
         outbound:
           type: object
           description: |
-            The sing-box outbound without any credential. A `wireguard` node is the options of a
+            The whole sing-box outbound, credentials included (without `tag`). A `wireguard` node is the options of a
             sing-box endpoint (`address`, `private_key`, `peers`).
         active:
           type: boolean
@@ -4218,7 +4373,49 @@ components:
           type: string
           description: The ECS address of foreign queries ("" restores the default).
         learning:
-          $ref: "#/components/schemas/Learning"
+          $ref: "#/components/schemas/LearningPatch"
+    LearningPatch:
+      type: object
+      additionalProperties: false
+      description: |
+        The switches of `Learning`, and `limits`: per category key, its capacity and how long a
+        name is kept (`ttl_seconds`, 60 to 315360000). While the periodic re-query runs, `no_v4`
+        (learned only by it) must be kept longer than its interval (400 otherwise).
+      properties:
+        enabled:
+          type: boolean
+        remember_direct:
+          type: boolean
+        remember_proxy:
+          type: boolean
+        no_v4:
+          type: boolean
+        no_v6:
+          type: boolean
+        limits:
+          type: object
+          additionalProperties: false
+          properties:
+            remember_direct:
+              $ref: "#/components/schemas/LearningLimit"
+            remember_proxy:
+              $ref: "#/components/schemas/LearningLimit"
+            no_v4:
+              $ref: "#/components/schemas/LearningLimit"
+            no_v6:
+              $ref: "#/components/schemas/LearningLimit"
+    LearningLimit:
+      type: object
+      additionalProperties: false
+      properties:
+        max_entries:
+          type: integer
+          minimum: 1
+          maximum: 262144
+        ttl_seconds:
+          type: integer
+          minimum: 60
+          maximum: 315360000
     Dns:
       allOf:
         - $ref: "#/components/schemas/DnsPatch"

@@ -83,7 +83,7 @@ async function submit() {
 </script>
 
 <template>
-  <AppModal :title="provider ? '编辑订阅' : '添加订阅'" @close="emit('close')">
+  <AppModal :dismissible="false" :title="provider ? '编辑订阅' : '添加订阅'" @close="emit('close')">
     <div class="field">
       <label for="pname">名称</label>
       <input id="pname" v-model="form.name" class="inp" autocomplete="off" />

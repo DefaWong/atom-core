@@ -6,19 +6,22 @@ import { lines, loadRulesets, parseNames, type Builtin, type Ruleset } from '../
 import { refreshStatus } from '../composables/status'
 import { toast } from '../composables/toast'
 
-/** A new custom ruleset, an edit of one, or a builtin set's download address. */
-const props = defineProps<{ mode: 'new' | 'edit' | 'url'; target?: Ruleset | Builtin }>()
+/** A new custom ruleset, an edit of one, or a builtin set's source (address and automatic update). */
+const props = defineProps<{ mode: 'new' | 'edit' | 'builtin'; target?: Ruleset | Builtin }>()
 const emit = defineEmits<{ close: [] }>()
 
 const FORMATS = ['auto', 'text', 'yaml', 'json', 'srs', 'mrs', 'dat']
 const custom = props.target && props.target.type !== 'builtin' ? (props.target as Ruleset) : undefined
+const builtin = props.target?.type === 'builtin' ? (props.target as Builtin) : undefined
 const form = reactive({
   type: (custom?.type === 'local' ? 'local' : 'remote') as 'remote' | 'local',
   name: props.target?.name ?? '',
   url: props.target?.url ?? '',
   format: custom?.format || 'auto',
   category: custom?.category ?? '',
-  text: ''
+  text: '',
+  autoUpdate: builtin?.auto_update ?? false,
+  hours: builtin?.update_interval_hours ?? 24
 })
 const error = ref('')
 const busy = ref(false)
@@ -53,9 +56,15 @@ async function submit() {
   error.value = ''
   busy.value = true
   try {
-    if (props.mode === 'url' && props.target) {
-      await call(client.PUT('/rulesets/{id}', { params: { path: { id: props.target.id } }, body: { url: form.url.trim() } }))
-      toast('ok', '已保存并下载')
+    if (props.mode === 'builtin' && builtin) {
+      if (form.autoUpdate && !(Number.isInteger(form.hours) && form.hours >= 1 && form.hours <= 8760)) throw new Error('更新周期是 1 到 8760 小时')
+      // Only what changed is sent; a new address is downloaded at once.
+      const body: { url?: string; auto_update?: boolean; update_interval_hours?: number } = {}
+      if (form.url.trim() !== (builtin.url ?? '')) body.url = form.url.trim()
+      if (form.autoUpdate !== builtin.auto_update) body.auto_update = form.autoUpdate
+      if (form.autoUpdate && form.hours !== builtin.update_interval_hours) body.update_interval_hours = form.hours
+      if (Object.keys(body).length) await call(client.PUT('/rulesets/{id}', { params: { path: { id: builtin.id } }, body }))
+      toast('ok', body.url !== undefined ? '已保存并下载' : '已保存')
     } else {
       if (form.type === 'local' && parseNames(form.text).bad.length) throw new Error(stats())
       const source =
@@ -93,25 +102,25 @@ async function submit() {
   }
 }
 
-const titles = { new: '新建规则集', edit: '编辑规则集', url: '编辑下载地址' }
+const titles = { new: '新建规则集', edit: '编辑规则集', builtin: '编辑默认规则集' }
 </script>
 
 <template>
-  <AppModal :title="`${titles[mode]}${target ? ` · ${target.name}` : ''}`" @close="emit('close')">
+  <AppModal :dismissible="false" :title="`${titles[mode]}${target ? ` · ${target.name}` : ''}`" @close="emit('close')">
     <div v-if="mode === 'new'" class="seg" style="align-self: flex-start">
       <button type="button" :class="{ on: form.type === 'remote' }" @click="form.type = 'remote'">远程订阅</button>
       <button type="button" :class="{ on: form.type === 'local' }" @click="form.type = 'local'">本地列表</button>
     </div>
-    <div v-if="mode !== 'url'" class="field">
+    <div v-if="mode !== 'builtin'" class="field">
       <label for="rsname">名称</label>
       <input id="rsname" v-model="form.name" class="inp" autocomplete="off" />
     </div>
-    <template v-if="mode === 'url' || form.type === 'remote'">
+    <template v-if="mode === 'builtin' || form.type === 'remote'">
       <div class="field">
         <label for="rsurl">URL</label>
         <input id="rsurl" v-model="form.url" class="inp mono" placeholder="https://…" autocomplete="off" />
       </div>
-      <div v-if="mode !== 'url'" class="row">
+      <div v-if="mode !== 'builtin'" class="row">
         <div class="field">
           <label for="rsfmt">格式</label>
           <select id="rsfmt" v-model="form.format" class="inp" style="width: auto">
@@ -124,7 +133,17 @@ const titles = { new: '新建规则集', edit: '编辑规则集', url: '编辑�
         </div>
       </div>
     </template>
-    <div v-if="mode !== 'url' && form.type === 'local'" class="field">
+    <template v-if="mode === 'builtin'">
+      <div class="row">
+        <div style="flex: 1">自动更新</div>
+        <button class="sw" type="button" :class="{ on: form.autoUpdate }" :aria-pressed="form.autoUpdate" aria-label="自动更新" @click="form.autoUpdate = !form.autoUpdate"></button>
+      </div>
+      <div v-if="form.autoUpdate" class="field">
+        <label for="rshours">更新周期（小时）</label>
+        <input id="rshours" v-model.number="form.hours" class="inp" type="number" min="1" max="8760" step="1" style="width: 120px" />
+      </div>
+    </template>
+    <div v-if="mode !== 'builtin' && form.type === 'local'" class="field">
       <label for="rstext">名单</label>
       <textarea id="rstext" v-model="form.text" class="inp" style="min-height: 160px" :disabled="loading" placeholder="domain:example.com&#10;full:www.example.com&#10;keyword:tracker&#10;regexp:^ads?\d*\."></textarea>
       <span class="hint" :style="{ color: parseNames(form.text).bad.length ? 'var(--bad)' : '' }">{{ stats() }}</span>

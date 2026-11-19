@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
 import { call, client, describe, type Schemas } from '../api/client'
+import AppModal from '../components/AppModal.vue'
 import DnsTabs from '../components/DnsTabs.vue'
 import LogDetail from '../components/LogDetail.vue'
 import { answerText, logTime, ms, tagLabel } from '../composables/dnslog'
 import { loadRules, loadUpstreams } from '../composables/rules'
+import { toast } from '../composables/toast'
 
 const PAGE_SIZE = 50
 const logs = ref<Schemas['AuditLog'][]>([])
@@ -68,6 +70,25 @@ function go(next: number) {
   load()
 }
 
+const clearing = ref(false)
+const clearBusy = ref(false)
+const clearError = ref('')
+async function clearLogs() {
+  clearBusy.value = true
+  clearError.value = ''
+  try {
+    await call(client.POST('/audit/clear'))
+    clearing.value = false
+    toast('ok', '日志已清空')
+    page.value = 1
+    await load()
+  } catch (failure) {
+    clearError.value = describe(failure)
+  } finally {
+    clearBusy.value = false
+  }
+}
+
 </script>
 
 <template>
@@ -84,6 +105,7 @@ function go(next: number) {
       <button class="btn sm" type="button" :disabled="page <= 1 || loading" @click="go(page - 1)">上一页</button>
       <button class="btn sm" type="button" :disabled="page >= pages || loading" @click="go(page + 1)">下一页</button>
       <button class="btn sm" type="button" :disabled="loading" @click="load">刷新</button>
+      <button class="btn sm danger" type="button" @click="((clearing = true), (clearError = ''))">清空日志</button>
     </div>
     <div v-if="error" class="err">{{ error }}</div>
     <div class="tblwrap">
@@ -107,4 +129,12 @@ function go(next: number) {
     </div>
   </div>
   <LogDetail v-if="opened" :log="opened" @close="opened = null" />
+  <AppModal v-if="clearing" title="清空日志" @close="clearing = false">
+    <div>将删除全部查询日志，查询统计和排行也会随之清空，此操作不可撤销。</div>
+    <div v-if="clearError" class="err">{{ clearError }}</div>
+    <template #footer>
+      <button class="btn" type="button" @click="clearing = false">取消</button>
+      <button class="btn red" type="button" :disabled="clearBusy" @click="clearLogs">清空</button>
+    </template>
+  </AppModal>
 </template>

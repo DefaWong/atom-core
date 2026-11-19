@@ -224,3 +224,14 @@ export function recordDelay(id: string, delay: number | null | undefined) {
   else failures.delete(id)
   if (runtime.value) runtime.value.nodes[id] = { delay: delay ?? null, time }
 }
+
+/** One node as text to edit or copy: the active kernel's format (Clash YAML for mihomo,
+ * sing-box JSON for sing-box), or JSON when the node has no mihomo form. */
+export async function nodeText(id: string): Promise<{ format: 'json' | 'yaml'; content: string }> {
+  try {
+    return await call(client.GET('/nodes/{id}/export', { params: { path: { id } } }))
+  } catch (failure) {
+    if (!(failure instanceof ApiError && failure.status === 422)) throw failure
+    return await call(client.GET('/nodes/{id}/export', { params: { path: { id }, query: { format: 'json' } } }))
+  }
+}

@@ -90,6 +90,20 @@ plugins:
             .map_err(|error| format!("{error:?}"))
     }
 
+    fn reply(&self, method: &str, target: &str) -> crate::rule_sources::Reply {
+        self.assembly
+            .block_on(crate::atom_rules_api::handle(
+                None,
+                self.assembly.config(),
+                self.assembly.cache(),
+                method,
+                target,
+                b"",
+                &TransportCancellation::new(),
+            ))
+            .expect("an atom route")
+    }
+
     fn call(&self, method: &str, target: &str, body: &str) -> (u16, Value) {
         let reply = self
             .assembly
@@ -626,21 +640,15 @@ fn settings_put_takes_its_own_lease() {
 }
 
 #[test]
-fn node_views_hide_credentials_and_edits_replace_the_connection() {
+fn node_views_carry_credentials_and_edits_replace_the_connection() {
     let api = Api::new("credentials");
     let (status, imported) = api.call("POST", "/api/v1/atom/nodes", TWO_LINKS);
     assert_eq!(status, 201);
     let hk = imported["nodes"][0]["id"].as_str().unwrap().to_owned();
-    assert!(
-        imported["nodes"][0]["outbound"].get("password").is_none(),
-        "{imported}"
-    );
-    let (_, listed) = api.call("GET", "/api/v1/atom/nodes", "");
-    assert!(!listed.to_string().contains("\"password\""), "{listed}");
+    assert_eq!(imported["nodes"][0]["outbound"]["password"], "pw", "{imported}");
     let (_, one) = api.call("GET", &format!("/api/v1/atom/nodes/{hk}"), "");
     assert_eq!(one["outbound"]["server"], "hk.example");
-    assert!(one["outbound"].get("password").is_none());
-    // The file sing-box runs still has the credentials.
+    assert_eq!(one["outbound"]["password"], "pw");
     assert_eq!(api.outbound(&hk)["password"], "pw");
 
     let (status, _) = api.call(
@@ -679,6 +687,88 @@ fn node_views_hide_credentials_and_edits_replace_the_connection() {
     let (status, _) = api.call("POST", "/api/v1/atom/nodes/g-default/delay", "{}");
     assert_eq!(status, 404);
     let (status, _) = api.call("POST", &format!("/api/v1/atom/groups/{hk}/delay"), "{}");
+    assert_eq!(status, 404);
+}
+
+/// `nodes/{id}/export` gives the text `PUT nodes/{id}` takes back: saving it
+/// unchanged leaves the connection as it is, in either format.
+#[test]
+fn an_exported_node_saves_back_unchanged() {
+    let api = Api::new("export");
+    let (_, imported) = api.call("POST", "/api/v1/atom/nodes", TWO_LINKS);
+    let hk = imported["nodes"][0]["id"].as_str().unwrap().to_owned();
+    let before = api.outbound(&hk);
+
+    let reply = api.reply("GET", &format!("/api/v1/atom/nodes/{hk}/export"));
+    assert!(reply.headers.contains(&("Cache-Control", "no-store".to_owned())));
+    let (status, json_text) = api.call("GET", &format!("/api/v1/atom/nodes/{hk}/export"), "");
+    assert_eq!(status, 200, "{json_text}");
+    assert_eq!(json_text["format"], "json", "sing-box is the default kernel");
+    let content = json_text["content"].as_str().unwrap();
+    assert!(content.trim_start().starts_with("{\n  \"tag\": \"香港\""), "{content}");
+    assert!(content.contains("\"password\": \"pw\""), "{content}");
+
+    let (status, yaml_text) = api.call("GET", &format!("/api/v1/atom/nodes/{hk}/export?format=yaml"), "");
+    assert_eq!(status, 200, "{yaml_text}");
+    let yaml = yaml_text["content"].as_str().unwrap();
+    assert!(yaml.starts_with("name: 香港\ntype: trojan\n"), "{yaml}");
+    assert!(yaml.contains("password: pw"), "{yaml}");
+
+    for text in [&json_text, &yaml_text] {
+        let body = serde_json::json!({"format": text["format"], "content": text["content"]});
+        let (status, saved) = api.call("PUT", &format!("/api/v1/atom/nodes/{hk}"), &body.to_string());
+        assert_eq!(status, 200, "{saved}");
+        assert_eq!(saved["node"]["name"], "香港");
+        assert_eq!(api.outbound(&hk), before, "{}", text["format"]);
+    }
+
+    // A field the YAML edit changes but the importer does not read is refused,
+    // not dropped.
+    assert!(yaml.contains("udp: true"), "{yaml}");
+    let body = serde_json::json!({"format": "yaml", "content": yaml.replace("udp: true", "udp: false")});
+    let (status, refused) = api.call("PUT", &format!("/api/v1/atom/nodes/{hk}"), &body.to_string());
+    assert_eq!(status, 400, "{refused}");
+    assert!(refused["error"].as_str().unwrap().contains("udp"), "{refused}");
+    assert_eq!(api.outbound(&hk), before);
+    // Read as an outbound mihomo has no form for: refused, nothing saved.
+    let body = serde_json::json!({"format": "yaml", "content": format!("{yaml}disable-sni: true\n")});
+    let (status, refused) = api.call("PUT", &format!("/api/v1/atom/nodes/{hk}"), &body.to_string());
+    assert_eq!(status, 400, "{refused}");
+    assert!(refused["error"].as_str().unwrap().contains("mihomo"), "{refused}");
+    assert_eq!(api.outbound(&hk), before);
+
+    // Hysteria2 bandwidth and a VLESS packet encoding come back from YAML; a
+    // node the YAML cannot carry whole is offered only as JSON.
+    let nodes = serde_json::json!([
+        {"tag": "hy", "type": "hysteria2", "server": "h.example", "server_port": 443,
+         "password": "p", "up_mbps": 50, "down_mbps": 200,
+         "tls": {"enabled": true, "server_name": "h.example"}},
+        {"tag": "vl", "type": "vless", "server": "v.example", "server_port": 443,
+         "uuid": "9b1c2e4a-0000-4000-8000-000000000001", "packet_encoding": "packetaddr"},
+        {"tag": "bare", "type": "vless", "server": "b.example", "server_port": 443,
+         "uuid": "9b1c2e4a-0000-4000-8000-000000000002"}
+    ]);
+    let body = serde_json::json!({"format": "json", "content": nodes.to_string()});
+    let (status, imported) = api.call("POST", "/api/v1/atom/nodes", &body.to_string());
+    assert_eq!(status, 201, "{imported}");
+    for (index, round_trips) in [(0, true), (1, true), (2, false)] {
+        let id = imported["nodes"][index]["id"].as_str().unwrap().to_owned();
+        let before = api.outbound(&id);
+        let (status, text) = api.call("GET", &format!("/api/v1/atom/nodes/{id}/export?format=yaml"), "");
+        if !round_trips {
+            assert_eq!(status, 422, "{text}");
+            continue;
+        }
+        assert_eq!(status, 200, "{text}");
+        let body = serde_json::json!({"format": "yaml", "content": text["content"]});
+        let (status, saved) = api.call("PUT", &format!("/api/v1/atom/nodes/{id}"), &body.to_string());
+        assert_eq!(status, 200, "{saved}");
+        assert_eq!(api.outbound(&id), before, "{}", text["content"]);
+    }
+
+    let (status, _) = api.call("GET", &format!("/api/v1/atom/nodes/{hk}/export?format=link"), "");
+    assert_eq!(status, 400);
+    let (status, _) = api.call("GET", "/api/v1/atom/nodes/n-missing/export", "");
     assert_eq!(status, 404);
 }
 
@@ -1465,6 +1555,15 @@ fn catalog_entries_become_managed_rulesets_while_rules_name_them() {
         409,
         "in use"
     );
+    // The UI sends the ID percent-encoded (`encodeURIComponent`).
+    let (status, shown) = api.call("GET", "/api/v1/atom/rulesets/bm7%3ATelegram", "");
+    assert_eq!((status, &shown["id"]), (200, &serde_json::json!("bm7:Telegram")), "{shown}");
+    assert_eq!(
+        api.call("PUT", "/api/v1/atom/rulesets/bm7%3ATelegram", r#"{"name": "x"}"#).0,
+        400
+    );
+    assert_eq!(api.call("DELETE", "/api/v1/atom/rulesets/bm7%3ATelegram", "").0, 409);
+    assert_eq!(api.call("GET", "/api/v1/atom/rulesets/bm7%3ANope", "").0, 404);
     let (status, _) = api.call("DELETE", &format!("/api/v1/atom/rules/{rule}"), "");
     assert_eq!(status, 200);
     assert!(rules.ruleset("bm7:Telegram").is_none(), "the last rule took its set along");

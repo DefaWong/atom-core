@@ -7,6 +7,7 @@
 //! |---|---|
 //! | `nodes` | GET, POST `{format: json\|yaml\|link, content}` (import) |
 //! | `nodes/{id}` | GET, PUT `{name?, format?, content?}`, DELETE |
+//! | `nodes/{id}/export` | GET `?format=json\|yaml` (one node as text) |
 //! | `nodes/delete` | POST `{ids}` (delete several nodes at once, all or none) |
 //! | `nodes/{id}/delay` | POST `{url?, timeout?}` (Clash API) |
 //! | `groups` | GET, POST `{name, type, members, ...}` |
@@ -24,9 +25,9 @@
 //! | `apply` | GET (the latest application), POST (apply again) |
 //!
 //! Every write takes an optional `version` (body, or `?version=` for
-//! DELETE) checked against the proxy state's version. Node views never
-//! carry credentials ([`crate::atom_proxy::public_outbound`]): a node's
-//! connection is replaced whole, by new import content. A write that changes
+//! DELETE) checked against the proxy state's version. Node views carry the
+//! whole outbound, credentials included; `nodes/{id}/export` gives one node
+//! in the active kernel's format. A write that changes
 //! the generated sing-box configuration is applied to sing-box first
 //! ([`AtomRules::transact`]); a failure there leaves everything unchanged.
 
@@ -99,7 +100,7 @@ fn node_view(
         "type": node.outbound.get("type"),
         "server": node.outbound.get("server"),
         "server_port": node.outbound.get("server_port"),
-        "outbound": crate::atom_proxy::public_outbound(&node.outbound),
+        "outbound": node.outbound,
         "groups": state.groups_containing(&node.id),
     })
 }
@@ -280,6 +281,76 @@ async fn import_nodes(rules: &AtomRules, bytes: &[u8]) -> Answer {
     ))
 }
 
+/// A map written with the given keys first, in that order, then the rest
+/// (`serde_json::Map` keeps its keys sorted).
+struct Ordered<'a>(Vec<(&'a str, &'a Value)>);
+
+impl serde::Serialize for Ordered<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (key, value) in &self.0 {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
+}
+
+fn ordered<'a>(map: &'a Map<String, Value>, first: &[&'a str]) -> Ordered<'a> {
+    let mut entries: Vec<(&str, &Value)> = first
+        .iter()
+        .filter_map(|key| map.get(*key).map(|value| (*key, value)))
+        .collect();
+    entries.extend(
+        map.iter()
+            .filter(|(key, _)| !first.contains(&key.as_str()))
+            .map(|(key, value)| (key.as_str(), value)),
+    );
+    Ordered(entries)
+}
+
+/// One node as the text `PUT nodes/{id}` takes back (`format` and
+/// `content`): a sing-box outbound (`tag` is the name) or a Clash/mihomo
+/// proxy (`name`). Without `format`, the active kernel's: yaml for mihomo,
+/// json for sing-box. 422 when the node has no mihomo form.
+pub(crate) fn export_node(state: &ProxyState, id: &str, query: Option<&str>) -> Answer {
+    let node = state
+        .node(id)
+        .ok_or_else(|| error(404, format!("节点 `{id}` 不存在")))?;
+    let format = match query_value(query, "format") {
+        Some("json") => "json",
+        Some("yaml") => "yaml",
+        None if state.settings.backend == crate::atom_proxy::Backend::Mihomo => "yaml",
+        None => "json",
+        Some(other) => return Err(error(400, format!("不支持的 format `{other}`：json 或 yaml"))),
+    };
+    let content = if format == "yaml" {
+        let Value::Object(mut proxy) =
+            crate::atom_mihomo::convert_proxy(node).map_err(|message| error(422, message))?
+        else {
+            return Err(error(500, "节点转换结果不是映射"));
+        };
+        proxy.insert("name".into(), json!(node.name));
+        let text = yaml_serde::to_string(&ordered(&proxy, &["name", "type", "server", "port"]))
+            .map_err(|e| error(500, format!("YAML 生成失败: {e}")))?;
+        // Saved back, the text replaces the whole connection: offer it only
+        // when it reads back as the same outbound.
+        let back = crate::atom_links::from_clash_yaml(&text).ok();
+        if back.as_deref().map(|nodes| nodes.iter().map(|n| &n.1).collect::<Vec<_>>())
+            != Some(vec![&node.outbound])
+        {
+            return Err(error(422, "这个节点的 Clash YAML 不能完整表示，请用 JSON 编辑"));
+        }
+        text
+    } else {
+        let mut outbound = node.outbound.clone();
+        outbound.insert("tag".into(), json!(node.name));
+        serde_json::to_string_pretty(&ordered(&outbound, &["tag", "type", "server", "server_port"]))
+            .map_err(|e| error(500, format!("JSON 生成失败: {e}")))?
+    };
+    Ok(reply_json(200, &json!({ "format": format, "content": content })))
+}
+
 /// Converts import content (`format`: json, yaml or link) to nodes.
 fn parse_import(format: &str, content: Value) -> Result<Vec<crate::atom_links::Imported>, Reply> {
     let text = content.as_str().map(str::to_owned);
@@ -311,8 +382,13 @@ async fn update_node(rules: &AtomRules, id: &str, bytes: &[u8]) -> Answer {
     let (version, map) = object(bytes)?;
     let update: Update = from_map(map)?;
     rules.check_proxy_version(version).map_err(|e| fail(&e))?;
-    // No content: the connection stays as it is (the API never shows its
-    // credentials, so it cannot be edited field by field).
+    // No content: the connection stays as it is. With content, the node is
+    // replaced whole by it; `name` (or the current name) wins over the one
+    // in the content.
+    let yaml = match (&update.format, &update.content) {
+        (Some(format), Some(Value::String(text))) if format == "yaml" => Some(text.clone()),
+        _ => None,
+    };
     let outbound = match (update.format, update.content) {
         (Some(format), Some(content)) => {
             let mut imported = parse_import(&format, content)?;
@@ -328,6 +404,9 @@ async fn update_node(rules: &AtomRules, id: &str, bytes: &[u8]) -> Answer {
     let node = next
         .update_node(id, update.name, outbound)
         .map_err(|e| fail(&e))?;
+    if let Some(text) = yaml {
+        unkept_yaml(&text, &node)?;
+    }
     next.version += 1;
     let version = next.version;
     rules
@@ -338,6 +417,62 @@ async fn update_node(rules: &AtomRules, id: &str, bytes: &[u8]) -> Answer {
         200,
         &json!({ "version": version, "node": node_view(&next, &next.inactive_nodes(), &node) }),
     ))
+}
+
+/// A YAML edit is saved as the sing-box outbound it reads as: refuses it
+/// when a field written in it does not come back the same from that outbound
+/// (the importer leaves it out or reads it another way).
+fn unkept_yaml(text: &str, node: &crate::atom_proxy::Node) -> Result<(), Reply> {
+    let written = match yaml_serde::from_str::<Value>(text) {
+        Ok(Value::Object(mut map)) if map.contains_key("proxies") => {
+            map.remove("proxies").and_then(|list| list.get(0).cloned())
+        }
+        Ok(Value::Array(list)) => list.first().cloned(),
+        Ok(value) => Some(value),
+        Err(_) => None,
+    };
+    let saved = crate::atom_mihomo::convert_proxy(node)
+        .map_err(|reason| error(400, format!("保存后无法转换为 mihomo 节点：{reason}")))?;
+    let Some(Value::Object(mut written)) = written else {
+        return Ok(());
+    };
+    written.remove("name");
+    let mut lost = Vec::new();
+    unkept(&Value::Object(written), &saved, "", &mut lost);
+    if lost.is_empty() {
+        Ok(())
+    } else {
+        Err(error(400, format!("这些字段保存不了（导入时被忽略或改写）：{}", lost.join("、"))))
+    }
+}
+
+/// The paths in `written` that `saved` does not carry the same way; scalars
+/// compare as text, and a bare rate `n` is `n Mbps`.
+fn unkept(written: &Value, saved: &Value, path: &str, lost: &mut Vec<String>) {
+    let scalar = |value: &Value| match value {
+        Value::String(text) => Some(text.strip_suffix(" Mbps").filter(|n| n.bytes().all(|b| b.is_ascii_digit())).unwrap_or(text).to_owned()),
+        Value::Number(_) | Value::Bool(_) => Some(value.to_string()),
+        _ => None,
+    };
+    match (written, saved) {
+        (Value::Object(written), Value::Object(saved)) => {
+            for (key, value) in written {
+                let at = if path.is_empty() { key.clone() } else { format!("{path}.{key}") };
+                match saved.get(key) {
+                    Some(kept) => unkept(value, kept, &at, lost),
+                    None if value.is_null() => {}
+                    None => lost.push(at),
+                }
+            }
+        }
+        (Value::Array(written), Value::Array(saved)) if written.len() == saved.len() => {
+            for (index, (value, kept)) in written.iter().zip(saved).enumerate() {
+                unkept(value, kept, &format!("{path}[{index}]"), lost);
+            }
+        }
+        _ if scalar(written).is_some() && scalar(written) == scalar(saved) => {}
+        _ => lost.push(path.to_owned()),
+    }
 }
 
 async fn delete_node(rules: &AtomRules, id: &str, query: Option<&str>) -> Answer {
@@ -1350,6 +1485,7 @@ pub(crate) async fn handle(
                 None => Err(error(404, format!("节点 `{id}` 不存在"))),
             }
         }
+        ("GET", ["nodes", id, "export"]) => export_node(&current(), id, query),
         ("PUT", ["nodes", id]) => update_node(rules, id, body).await,
         ("DELETE", ["nodes", id]) => delete_node(rules, id, query).await,
         ("POST", ["nodes", id, "delay"]) => delay(rules, id, true, body).await,
@@ -1403,7 +1539,12 @@ pub(crate) async fn handle(
             .map_err(|e| fail(&e)),
         _ => Err(error(405, "method not allowed")),
     };
-    answer.unwrap_or_else(|reply| reply)
+    let mut reply = answer.unwrap_or_else(|reply| reply);
+    // Node replies carry the credentials.
+    if segments.first() == Some(&"nodes") {
+        reply.headers.push(("Cache-Control", "no-store".to_owned()));
+    }
+    reply
 }
 
 #[cfg(test)]

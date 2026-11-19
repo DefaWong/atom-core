@@ -3716,7 +3716,8 @@ fn compile_atom_rules(
     let args = expect_map(&plugin.args, &path, "atom_rules args must be a mapping")?;
     args.reject_unknown(
         &[
-            "marks", "builtin", "ip_builtin", "mapper", "socks5", "singbox", "routes", "route_ecs",
+            "marks", "builtin", "ip_builtin", "mapper", "socks5", "socks5_fallback", "singbox", "routes",
+            "route_ecs",
         ],
         &path,
     )?;
@@ -3840,7 +3841,12 @@ fn compile_atom_rules(
         routes,
         inputs,
     )
-    .inspect(|rules| rules.set_ip_builtin(ip_builtin))
+    .inspect(|rules| {
+        rules.set_ip_builtin(ip_builtin);
+        rules
+            .direct_fallback
+            .set(matches!(args.get("socks5_fallback"), Some(RawValue::Bool(true))));
+    })
         .map_err(|reason| ConfigError::new(&path, reason))?;
     Ok(Rc::new(rules))
 }

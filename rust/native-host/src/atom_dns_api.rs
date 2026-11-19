@@ -93,15 +93,21 @@ pub(crate) async fn handle(
             Some(control) => reply_json(200, &upstream_stats(config, control)),
             None => error(503, "runtime control is unavailable"),
         },
+        ("POST", ["stats", "reset"]) => match control {
+            Some(control) => reset_stats(config, cache, control),
+            None => error(503, "runtime control is unavailable"),
+        },
         ("GET", ["learning"]) => learning_view(config).await,
         ("POST", ["learning", key, "flush"]) => flush_learning(config, key).await,
         ("GET", ["requery"]) => requery_view(config).await,
-        ("PUT", ["requery"]) => put_requery(config, body).await,
+        ("PUT", ["requery"]) => put_requery(control, config, body).await,
         ("POST", ["requery", "trigger"]) => trigger(config).await,
         (_, ["dns" | "upstreams" | "rewrite", ..])
         | (_, ["caches" | "learning" | "requery"])
         | (_, ["caches" | "learning", _, "flush"])
-        | (_, ["stats", "upstreams"] | ["requery", "trigger"]) => error(405, "method not allowed"),
+        | (_, ["stats", "upstreams" | "reset"] | ["requery", "trigger"]) => {
+            error(405, "method not allowed")
+        }
         (_, ["caches" | "stats" | "learning" | "requery", ..]) => error(404, "not found"),
         _ => return None,
     })
@@ -306,9 +312,49 @@ fn dns_settings(config: &CompiledConfig, mut patch: Map<String, Value>) -> Resul
             remember_proxy: Option<bool>,
             no_v4: Option<bool>,
             no_v6: Option<bool>,
+            /// Per category key: its capacity and how long a name is kept.
+            #[serde(default)]
+            limits: std::collections::BTreeMap<String, Limit>,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Limit {
+            max_entries: Option<u64>,
+            ttl_seconds: Option<u64>,
         }
         let patch: Patch =
             serde_json::from_value(raw).map_err(|e| format!("learning 无效: {e}"))?;
+        let cap = u64::try_from(crate::route_learner::MAX_ENTRIES_CAP).unwrap_or(u64::MAX);
+        let (low, high) = crate::config::settings::LEARNER_TTL_RANGE;
+        for (key, limit) in &patch.limits {
+            let Some((_, tag)) = CATEGORIES.iter().find(|(name, _)| name == key) else {
+                return Err(format!("学习类别 `{key}` 不存在"));
+            };
+            let Some((_, yaml)) = config
+                .yaml_defaults
+                .categories
+                .iter()
+                .find(|(name, _)| name == tag)
+            else {
+                return Err(format!("配置里没有学习类别 `{tag}`"));
+            };
+            let tuning = settings.learning.categories.entry((*tag).to_owned()).or_default();
+            if let Some(max) = limit.max_entries {
+                if !(1..=cap).contains(&max) {
+                    return Err(format!("{key} 的上限是 1 到 {cap}"));
+                }
+                tuning.max_entries = (max != yaml.max_entries).then_some(max);
+            }
+            if let Some(ttl) = limit.ttl_seconds {
+                if !(low..=high).contains(&ttl) {
+                    return Err(format!("{key} 的有效期是 {low} 到 {high} 秒"));
+                }
+                tuning.ttl = (ttl != yaml.ttl).then_some(ttl);
+            }
+            if tuning.max_entries.is_none() && tuning.ttl.is_none() {
+                settings.learning.categories.remove(*tag);
+            }
+        }
         let before = Learning::of(config);
         let after = Learning {
             enabled: patch.enabled.unwrap_or(before.enabled),
@@ -406,6 +452,7 @@ async fn put_dns(control: &RuntimeControl, body: &[u8]) -> Reply {
         Ok(patch) => patch,
         Err(reply) => return reply,
     };
+    let learning_changed = patch.contains_key("learning");
     let current = control.view();
     let DnsChange {
         settings,
@@ -416,6 +463,11 @@ async fn put_dns(control: &RuntimeControl, body: &[u8]) -> Reply {
         Ok(built) => built,
         Err(reason) => return error(400, reason),
     };
+    if learning_changed {
+        if let Err(reason) = check_no_v4_ttl(&current.config, &settings).await {
+            return error(400, reason);
+        }
+    }
     let unchanged = settings == current.config.settings;
     drop(current);
     if !unchanged {
@@ -457,6 +509,58 @@ async fn put_dns(control: &RuntimeControl, body: &[u8]) -> Reply {
         Ok(value) => reply_json(200, &value),
         Err(e) => error(500, e),
     }
+}
+
+/// "No IPv4" is learned only by the periodic re-query: while that runs, a
+/// name must outlive the interval, or it is gone before the next run can
+/// confirm it. Checked on the settings a `PUT dns` would publish.
+async fn check_no_v4_ttl(config: &CompiledConfig, settings: &Settings) -> Result<(), String> {
+    let Ok(requery) = requery_of(config) else {
+        return Ok(());
+    };
+    let Ok(schedule) = requery_config(requery).await else {
+        return Ok(());
+    };
+    let scheduler = &schedule["scheduler"];
+    no_v4_outlives(
+        config,
+        settings,
+        scheduler["enabled"].as_bool().unwrap_or(false),
+        scheduler["interval_minutes"].as_u64().unwrap_or(0),
+    )
+}
+
+/// The `no_v4` lifetime against a requery schedule (`enabled`, every
+/// `minutes`).
+fn no_v4_outlives(
+    config: &CompiledConfig,
+    settings: &Settings,
+    enabled: bool,
+    minutes: u64,
+) -> Result<(), String> {
+    if !enabled || minutes == 0 {
+        return Ok(());
+    }
+    let Some((_, yaml)) = config
+        .yaml_defaults
+        .categories
+        .iter()
+        .find(|(tag, _)| tag == NO_V4)
+    else {
+        return Ok(());
+    };
+    let ttl = settings
+        .learning
+        .categories
+        .get(NO_V4)
+        .and_then(|tuning| tuning.ttl)
+        .unwrap_or(yaml.ttl);
+    if ttl <= minutes.saturating_mul(60) {
+        return Err(format!(
+            "「记忆无 V4」只在定期刷新时学到，有效期（{ttl} 秒）必须长于刷新间隔（{minutes} 分钟）"
+        ));
+    }
+    Ok(())
 }
 
 /// Starts a `requery` task on the generation that was just published (a
@@ -827,6 +931,21 @@ fn upstream_stats(config: &CompiledConfig, control: &RuntimeControl) -> Value {
     json!({ "groups": groups })
 }
 
+/// `POST stats/reset`: the named caches' query and hit counters and every
+/// upstream's counters back to zero (the query log has its own
+/// `audit/clear`).
+fn reset_stats(config: &CompiledConfig, cache: &CacheCatalog, control: &RuntimeControl) -> Reply {
+    for item in &config.caches {
+        if item.kind == crate::config::CacheKind::Named
+            && let Some(store) = cache.get(item.id)
+        {
+            store.reset_counters();
+        }
+    }
+    control.observer().reset_upstream_counters();
+    reply_json(200, &json!({ "ok": true }))
+}
+
 // ----- learning -------------------------------------------------------------
 
 /// The learning categories `learning` shows, by their key in `dns.learning`.
@@ -939,12 +1058,16 @@ async fn requery_view(config: &CompiledConfig) -> Reply {
 /// Serializes `PUT requery` (read, merge, store).
 static REQUERY_WRITES: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
 
+fn requery_writes() -> &'static tokio::sync::Mutex<()> {
+    REQUERY_WRITES.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 /// The longest interval `PUT requery` takes: a year.
 const MAX_INTERVAL_MINUTES: i64 = 525_600;
 
 /// `PUT requery {enabled?, interval_minutes?}`: the schedule. Turning it on
 /// without a start time starts the count now.
-async fn put_requery(config: &CompiledConfig, body: &[u8]) -> Reply {
+async fn put_requery(control: Option<&RuntimeControl>, config: &CompiledConfig, body: &[u8]) -> Reply {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Payload {
@@ -968,10 +1091,7 @@ async fn put_requery(config: &CompiledConfig, body: &[u8]) -> Reply {
     // plugin changes its configuration before writing it and puts the old
     // one back when the write fails, so an interleaved change could read a
     // value that is then undone, or be undone itself.
-    let _one = REQUERY_WRITES
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .lock()
-        .await;
+    let _one = requery_writes().lock().await;
     let current = match requery_config(requery).await {
         Ok(value) => value,
         Err(reply) => return reply,
@@ -985,6 +1105,14 @@ async fn put_requery(config: &CompiledConfig, body: &[u8]) -> Reply {
         .unwrap_or_else(|| scheduler["interval_minutes"].as_i64().unwrap_or(0));
     if enabled && interval <= 0 {
         return error(400, "开启定期刷新要先设好间隔");
+    }
+    // The settings as published now.
+    let view = control.map(RuntimeControl::view);
+    let settings = view.as_ref().map_or(&config.settings, |view| &view.config.settings);
+    if let Err(reason) =
+        no_v4_outlives(config, settings, enabled, u64::try_from(interval).unwrap_or(0))
+    {
+        return error(400, reason);
     }
     let mut start = scheduler["start_datetime"].as_str().unwrap_or("").to_owned();
     if start.is_empty() {

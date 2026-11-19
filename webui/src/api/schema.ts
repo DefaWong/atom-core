@@ -146,10 +146,12 @@ export interface paths {
          * Rename, change the source, or replace a local list; a builtin set's address
          * @description A custom ruleset: any of `name`, the source (`type` with its fields)
          *     and `rules` (local rulesets only); a catalog set cannot be changed
-         *     (400). A builtin set: only `{url}`, the download address of its one
-         *     source (409 for a set with several, such as `adguard`; 400 for one
-         *     without), downloaded at once (502 when that fails, the address is
-         *     kept and the old list stays).
+         *     (400). A builtin set: `url`, `auto_update` and `update_interval_hours`
+         *     (1 to 8760) of its one source (409 for a set with several, such as
+         *     `adguard`; 400 for one without); the automatic update follows the
+         *     saved settings. A new address is downloaded at once (502 with the
+         *     first failure's reason when that fails, the address is kept and the
+         *     old list stays).
          */
         put: operations["updateRuleset"];
         post?: never;
@@ -189,8 +191,11 @@ export interface paths {
          *
          *     A builtin set (`refreshable: true`): every enabled source of it is
          *     downloaded again and the new lists are in use before the answer
-         *     (`RefreshResult`). When no source could be downloaded, 502 and the
-         *     old lists stay.
+         *     (`RefreshResult`). When no source could be downloaded, 502 with the
+         *     first failure's reason and the old lists stay. A download whose
+         *     connection through `main_proxy` fails (at the proxy itself) is tried
+         *     once more directly; a TLS error, a bad status or a body over the limit
+         *     is not.
          */
         post: operations["refreshRuleset"];
         delete?: never;
@@ -311,6 +316,30 @@ export interface paths {
          *     error lists every refused ID in `failed`.
          */
         post: operations["deleteNodes"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/nodes/{id}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["Id"];
+            };
+            cookie?: never;
+        };
+        /**
+         * One node as text, to edit or copy
+         * @description A sing-box outbound (JSON, `tag` is the name) or a Clash/mihomo proxy (YAML, `name`), as
+         *     `PUT /nodes/{id}` takes back in `format` and `content`. Without `format`, the active kernel's:
+         *     `yaml` for mihomo, `json` for sing-box.
+         */
+        get: operations["exportNode"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -809,6 +838,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/maintenance/services": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The state of Atom's services
+         * @description The maintenance worker itself, AtomDNS and the proxy kernels installed (`atom-sing-box`,
+         *     `atom-mihomo`).
+         */
+        get: operations["getAtomServices"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/maintenance/restart": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restart one of Atom's services
+         * @description The worker answers first, then restarts the service. Restarting `atom-dns` stops the panel
+         *     and DNS for a few seconds; an unknown service is refused (400).
+         */
+        post: operations["restartAtomService"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/maintenance/confirm": {
         parameters: {
             query?: never;
@@ -1012,7 +1083,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Counters of every upstream since the process started
+         * Counters of every upstream since the process started or the latest stats/reset
          * @description By group in the configuration's order (the FakeIP group `nocnfake`
          *     too); only upstreams with a tag have counters. `errors` counts
          *     failures and timeouts; `winners` the answers that became the group's.
@@ -1020,6 +1091,28 @@ export interface paths {
         get: operations["getUpstreamStats"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/stats/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Set the cache and upstream counters back to zero
+         * @description The named caches' `queries`, `hits` and `lazy_hits` (`GET caches`) and every upstream's
+         *     counters (`GET stats/upstreams`). Cached entries stay; the query log is cleared with
+         *     `POST audit/clear`.
+         */
+        post: operations["resetStats"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1846,6 +1939,10 @@ export interface components {
             url?: string;
             /** @description The last download (RFC 3339). */
             updated?: string;
+            /** @description Downloaded again automatically, for a set with one source. */
+            auto_update?: boolean;
+            /** @description Hours between automatic downloads, for a set with one source. */
+            update_interval_hours?: number;
             name: string;
             /** @enum {string} */
             type: "builtin";
@@ -1912,6 +2009,8 @@ export interface components {
             sources: number;
             /** @description Of those, the ones that replaced their list (a failed one is logged). */
             updated: number;
+            /** @description The first failed source and why, when some failed. */
+            error?: string;
         };
         Node: {
             /** @description `n-` and 8 hex digits; the sing-box tag. */
@@ -1921,7 +2020,7 @@ export interface components {
             server?: string;
             server_port?: number;
             /**
-             * @description The sing-box outbound without any credential. A `wireguard` node is the options of a
+             * @description The whole sing-box outbound, credentials included (without `tag`). A `wireguard` node is the options of a
              *     sing-box endpoint (`address`, `private_key`, `peers`).
              */
             outbound: Record<string, never>;
@@ -2099,7 +2198,29 @@ export interface components {
             block_empty?: boolean;
             /** @description The ECS address of foreign queries ("" restores the default). */
             ecs?: string;
-            learning?: components["schemas"]["Learning"];
+            learning?: components["schemas"]["LearningPatch"];
+        };
+        /**
+         * @description The switches of `Learning`, and `limits`: per category key, its capacity and how long a
+         *     name is kept (`ttl_seconds`, 60 to 315360000). While the periodic re-query runs, `no_v4`
+         *     (learned only by it) must be kept longer than its interval (400 otherwise).
+         */
+        LearningPatch: {
+            enabled?: boolean;
+            remember_direct?: boolean;
+            remember_proxy?: boolean;
+            no_v4?: boolean;
+            no_v6?: boolean;
+            limits?: {
+                remember_direct?: components["schemas"]["LearningLimit"];
+                remember_proxy?: components["schemas"]["LearningLimit"];
+                no_v4?: components["schemas"]["LearningLimit"];
+                no_v6?: components["schemas"]["LearningLimit"];
+            };
+        };
+        LearningLimit: {
+            max_entries?: number;
+            ttl_seconds?: number;
         };
         Dns: components["schemas"]["DnsPatch"] & Record<string, never>;
         /** @description One upstream (more fields of AtomDNS's upstream entry are accepted and returned). */
@@ -2641,6 +2762,10 @@ export interface operations {
                     format?: string;
                     category?: string;
                     rules?: string[];
+                    /** @description A builtin set only. */
+                    auto_update?: boolean;
+                    /** @description A builtin set only. */
+                    update_interval_hours?: number;
                 };
             };
         };
@@ -2811,7 +2936,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The nodes (credentials left out). */
+            /** @description The nodes, credentials included. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2997,6 +3122,45 @@ export interface operations {
             404: components["responses"]["Error"];
             409: components["responses"]["Conflict"];
             502: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    exportNode: {
+        parameters: {
+            query?: {
+                format?: "json" | "yaml";
+            };
+            header?: never;
+            path: {
+                id: components["parameters"]["Id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The node's text. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        format: "json" | "yaml";
+                        content: string;
+                    };
+                };
+            };
+            404: components["responses"]["Error"];
+            /** @description The node has no mihomo form (`yaml`). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
             default: components["responses"]["Error"];
         };
     };
@@ -4087,6 +4251,65 @@ export interface operations {
             default: components["responses"]["Error"];
         };
     };
+    getAtomServices: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The services. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        services: {
+                            /** @enum {string} */
+                            name: "atom-maintenance" | "atom-dns" | "atom-sing-box" | "atom-mihomo";
+                            /** @enum {string} */
+                            state: "running" | "stopped" | "failed" | "unknown";
+                        }[];
+                    };
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    restartAtomService: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    service: "atom-maintenance" | "atom-dns" | "atom-sing-box" | "atom-mihomo";
+                };
+            };
+        };
+        responses: {
+            /** @description The restart will follow. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        ok: boolean;
+                    };
+                };
+            };
+            400: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
     confirmAtomNetwork: {
         parameters: {
             query?: never;
@@ -4478,6 +4701,31 @@ export interface operations {
                 };
             };
             404: components["responses"]["Error"];
+            503: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    resetStats: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Reset. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        ok: boolean;
+                    };
+                };
+            };
+            405: components["responses"]["MethodNotAllowed"];
             503: components["responses"]["Error"];
             default: components["responses"]["Error"];
         };

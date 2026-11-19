@@ -15,10 +15,10 @@ export function dismiss(id: number) {
   if (index >= 0) toasts.splice(index, 1)
 }
 
-/** A message in the corner; errors stay until closed, the rest go after a few seconds
- * (`ms` sets the delay, and makes an error go too). */
+/** A message in the corner; it goes after a few seconds (errors after 8), or when closed
+ * (`ms` sets the delay). */
 export function toast(kind: ToastKind, text: string, ms?: number) {
   const id = ++next
   toasts.push({ id, kind, text })
-  if (ms !== undefined || kind !== 'bad') setTimeout(() => dismiss(id), ms ?? 4000)
+  setTimeout(() => dismiss(id), ms ?? (kind === 'bad' ? 8000 : 4000))
 }

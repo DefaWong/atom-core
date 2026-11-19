@@ -79,7 +79,7 @@ async function reset() {
     <div v-if="error && !confirming" class="err">{{ error }}</div>
   </section>
 
-  <AppModal v-if="confirming" title="重置所有设置" @close="confirming = false">
+  <AppModal :dismissible="false" v-if="confirming" title="重置所有设置" @close="confirming = false">
     <div class="warnbox">Atom 将恢复为刚安装前的状态，此操作不能撤销。</div>
     <ul class="reset-list">
       <li>删除全部规则、节点、订阅、DNS 上游和其他设置，包括面板登录。</li>

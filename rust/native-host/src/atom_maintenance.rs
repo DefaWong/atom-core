@@ -22,6 +22,9 @@ pub(crate) fn route(method: &str, path: &str) -> Option<&'static str> {
         ("POST", "/confirm") => Some("/confirm"),
         // The factory reset: the worker starts the install wizard and the panel hands over to it.
         ("POST", "/reset") => Some("/reset"),
+        // The components' state, and a restart of one (the worker answers first).
+        ("GET", "/services") => Some("/services"),
+        ("POST", "/restart") => Some("/restart"),
         _ => None,
     }
 }
@@ -137,6 +140,16 @@ mod tests {
         assert_eq!(route("GET", "/api/v1/atom/maintenance/reset"), None);
         assert_eq!(route("POST", "/api/v1/atom/maintenance/reset/x"), None);
         assert_eq!(route("POST", "/api/v1/atom/maintenance"), None);
+        assert_eq!(
+            route("GET", "/api/v1/atom/maintenance/services"),
+            Some("/services")
+        );
+        assert_eq!(route("POST", "/api/v1/atom/maintenance/services"), None);
+        assert_eq!(
+            route("POST", "/api/v1/atom/maintenance/restart"),
+            Some("/restart")
+        );
+        assert_eq!(route("GET", "/api/v1/atom/maintenance/restart"), None);
     }
 
     #[test]

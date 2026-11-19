@@ -713,6 +713,12 @@ fn clash_smux(proxy: &Map<String, Value>, kind: &str) -> Result<Option<Value>, S
     Ok(Some(Value::Object(multiplex)))
 }
 
+/// `packet-encoding`, xudp when the proxy names none.
+fn packet_encoding(proxy: &Map<String, Value>) -> String {
+    let value = text(proxy, "packet-encoding");
+    if value.is_empty() { "xudp".to_owned() } else { value }
+}
+
 /// A mihomo rate (`StringToBps`: a bare integer is Mbps, otherwise
 /// `<n>[ ][K|M|G|T](bps|Bps)`) in whole Mbps; `None` for what mihomo reads
 /// as zero or anything below 1 Mbps.
@@ -945,7 +951,7 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
                 clash_tls(proxy, truthy(proxy, "tls")).value(),
             );
             put(&mut outbound, "transport", clash_transport(proxy)?);
-            outbound.insert("packet_encoding".into(), json!("xudp"));
+            outbound.insert("packet_encoding".into(), json!(packet_encoding(proxy)));
             outbound
         }
         "vless" => {
@@ -962,7 +968,7 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
                 clash_tls(proxy, truthy(proxy, "tls") || reality).value(),
             );
             put(&mut outbound, "transport", clash_transport(proxy)?);
-            outbound.insert("packet_encoding".into(), json!("xudp"));
+            outbound.insert("packet_encoding".into(), json!(packet_encoding(proxy)));
             outbound
         }
         "trojan" => {
@@ -984,6 +990,13 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
                     "obfs".into(),
                     json!({"type": obfs, "password": raw(proxy, "obfs-password")}),
                 );
+            }
+            // Zero (mihomo's "no limit") and what is not a whole Mbps are left
+            // out, as before these were read.
+            for (source, target) in [("up", "up_mbps"), ("down", "down_mbps")] {
+                if let Some(mbps) = clash_rate_mbps(&text(proxy, source)) {
+                    outbound.insert(target.into(), json!(mbps));
+                }
             }
             put(&mut outbound, "tls", clash_tls(proxy, true).value());
             outbound

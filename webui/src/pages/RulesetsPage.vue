@@ -47,12 +47,12 @@ const busy = ref('')
 async function refresh(target: Ruleset | Builtin) {
   busy.value = target.id
   try {
-    const answer = (await call(client.POST('/rulesets/{id}/refresh', { params: { path: { id: target.id } } }))) as { sources?: number; updated?: number }
+    const answer = (await call(client.POST('/rulesets/{id}/refresh', { params: { path: { id: target.id } } }))) as { sources?: number; updated?: number; error?: string }
     // A builtin set of several sources: some may have failed (only the rest replaced their lists).
     if (answer.sources !== undefined && answer.updated !== undefined && answer.updated < answer.sources) {
-      toast('warn', `「${target.name}」${answer.sources} 个来源中 ${answer.updated} 个已更新，其余下载失败`)
+      toast('warn', `「${target.name}」${answer.sources} 个来源中 ${answer.updated} 个已更新，其余下载失败${answer.error ? `：${answer.error}` : ''}`)
     } else {
-      toast('ok', `已刷新「${target.name}」`)
+      toast('ok', `已更新「${target.name}」`)
     }
   } catch (failure) {
     toast('bad', `「${target.name}」${describe(failure)}`)
@@ -77,7 +77,7 @@ async function sync() {
 }
 
 // ---- dialogs -------------------------------------------------------------------------
-const editing = ref<{ mode: 'new' | 'edit' | 'url'; target?: Ruleset | Builtin } | null>(null)
+const editing = ref<{ mode: 'new' | 'edit' | 'builtin'; target?: Ruleset | Builtin } | null>(null)
 
 // Deleting: a set rules name asks again, listing them (a rule left without a name or IP
 // condition is deleted with it).
@@ -149,7 +149,7 @@ async function remove(confirm: boolean) {
             </td>
             <td style="text-align: right; white-space: nowrap">
               <button class="btn sm" type="button" @click="editing = { mode: 'edit', target: set }">编辑</button>
-              <button v-if="set.type === 'remote'" class="btn sm" type="button" :disabled="busy === set.id" @click="refresh(set)">刷新</button>
+              <button v-if="set.type === 'remote'" class="btn sm" type="button" :disabled="busy === set.id" @click="refresh(set)">更新</button>
               <button class="btn sm danger" type="button" @click="removing = { target: set, rules: null }">删除</button>
             </td>
           </tr>
@@ -162,7 +162,7 @@ async function remove(confirm: boolean) {
     <div class="hd">
       <h2>内置规则集</h2>
       <span class="sp"></span>
-      <button class="btn sm" type="button" :disabled="busy === 'catalog'" @click="sync">立即同步</button>
+      <button class="btn sm" type="button" :disabled="busy === 'catalog'" @click="sync">同步目录</button>
     </div>
     <div class="grid g2" style="gap: 8px">
       <div class="tile">
@@ -186,7 +186,7 @@ async function remove(confirm: boolean) {
               <span v-if="set.last_error" class="pill bad" :title="set.last_error">下载失败</span>
               <span v-else class="pill ok">正常</span>
             </td>
-            <td style="text-align: right"><button class="btn sm" type="button" :disabled="busy === set.id" @click="refresh(set)">刷新</button></td>
+            <td style="text-align: right"><button class="btn sm" type="button" :disabled="busy === set.id" @click="refresh(set)">更新</button></td>
           </tr>
         </tbody>
       </table>
@@ -206,8 +206,8 @@ async function remove(confirm: boolean) {
             <td class="mono t2" style="max-width: 340px; overflow: hidden; text-overflow: ellipsis" :title="set.url">{{ set.url ?? '多个来源' }}</td>
             <td class="t2">{{ updatedAt(set.updated) }}</td>
             <td style="text-align: right; white-space: nowrap">
-              <button v-if="set.url" class="btn sm" type="button" @click="editing = { mode: 'url', target: set }">编辑 URL</button>
-              <button v-if="set.refreshable" class="btn sm" type="button" :disabled="busy === set.id" @click="refresh(set)">刷新</button>
+              <button v-if="set.url" class="btn sm" type="button" @click="editing = { mode: 'builtin', target: set }">编辑</button>
+              <button v-if="set.refreshable" class="btn sm" type="button" :disabled="busy === set.id" @click="refresh(set)">更新</button>
               <button v-if="!set.required" class="btn sm danger" type="button" @click="removing = { target: set, rules: null }">删除</button>
             </td>
           </tr>

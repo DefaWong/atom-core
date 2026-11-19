@@ -72,7 +72,7 @@ async function confirm() {
 </script>
 
 <template>
-  <AppModal :title="`切换到 ${target}`" @close="emit('close')">
+  <AppModal :dismissible="!handle.length" :title="`切换到 ${target}`" @close="emit('close')">
     <template v-if="check">
       <template v-if="target === 'sing-box'">
         <div v-if="check.provider_count" class="grid" style="gap: 8px">

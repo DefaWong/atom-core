@@ -81,6 +81,38 @@ pub(crate) async fn fetch(
     }
 }
 
+/// [`fetch`] through `fetch.socks5`, then (with `fallback`: the proxy is
+/// `main_proxy`) once more directly when the proxy
+/// itself failed (it may have no working node); a failure past the proxy
+/// (TLS, a bad status, a body over the limit) is not retried, and a direct
+/// fetch is tried once. Both failures are in the error.
+pub(crate) async fn fetch_or_direct(
+    fetch_args: Fetch<'_>,
+    fallback: bool,
+    cancel: &TransportCancellation,
+) -> Result<Vec<u8>, String> {
+    if fetch_args.socks5.is_empty() || !fallback {
+        return fetch(fetch_args, cancel).await;
+    }
+    let proxy_failure = format!("proxy {}: ", fetch_args.socks5);
+    let direct = Fetch {
+        socks5: "",
+        roots: fetch_args.roots.clone(),
+        ..fetch_args
+    };
+    match fetch(fetch_args, cancel).await {
+        Ok(bytes) => Ok(bytes),
+        Err(_) if cancel.is_cancelled() => Err("canceled by shutdown".to_owned()),
+        // Only a failure at the proxy itself (connecting to it, or its
+        // refusing the connection) is retried; anything past it is the
+        // server's answer.
+        Err(other) if !other.starts_with(&proxy_failure) => Err(other),
+        Err(proxied) => fetch(direct, cancel)
+            .await
+            .map_err(|direct| format!("经代理: {proxied}；直连: {direct}")),
+    }
+}
+
 /// Performs `call` and returns the final status and body (at most
 /// `max_bytes`; a longer body is an error).
 ///
@@ -148,6 +180,7 @@ async fn call_once(url: &url::Url, call: &Call<'_>) -> Result<Reply, String> {
         atomdns_upstream_core::socks5::connect(call.socks5, &host, port)
             .await
             .map_err(|error| format!("proxy {}: {error}", call.socks5))?
+        // (`fetch_or_direct` reads this prefix as a failure at the proxy.)
     };
     let io: Box<dyn Io> = if https {
         Box::new(tls(tcp, &host, call.roots.clone()).await?)

@@ -206,9 +206,9 @@ struct TreeEntry {
     kind: String,
 }
 
-async fn tree(url: &str, socks5: &str) -> Result<Tree, String> {
+async fn tree(url: &str, socks5: &str, fallback: bool) -> Result<Tree, String> {
     let shutdown = atomdns_upstream_core::TransportCancellation::new();
-    let bytes = crate::rule_download::fetch(
+    let bytes = crate::rule_download::fetch_or_direct(
         crate::rule_download::Fetch {
             url,
             socks5,
@@ -216,6 +216,7 @@ async fn tree(url: &str, socks5: &str) -> Result<Tree, String> {
             max_bytes: SYNC_LIMIT,
             roots: None,
         },
+        fallback,
         &shutdown,
     )
     .await
@@ -243,14 +244,19 @@ fn files(tree: &Tree, extension: &str) -> Vec<String> {
 
 /// Reads the three directories from GitHub's API (through `socks5`) and
 /// writes the synced index. Nothing is written unless all three answered.
-pub(crate) async fn sync(root: &Path, socks5: &str, now: i64) -> Result<Catalog, String> {
+pub(crate) async fn sync(
+    root: &Path,
+    socks5: &str,
+    fallback: bool,
+    now: i64,
+) -> Result<Catalog, String> {
     // Unit tests do not reach GitHub (the OpenAPI test calls every route).
     if cfg!(test) {
         return Err("单元测试不访问 GitHub".to_owned());
     }
-    let geosite = tree(&format!("{META_TREES}/geosite"), socks5).await?;
-    let geoip = tree(&format!("{META_TREES}/geoip"), socks5).await?;
-    let bm7 = tree(BM7_TREE, socks5).await?;
+    let geosite = tree(&format!("{META_TREES}/geosite"), socks5, fallback).await?;
+    let geoip = tree(&format!("{META_TREES}/geoip"), socks5, fallback).await?;
+    let bm7 = tree(BM7_TREE, socks5, fallback).await?;
     let mut bm7_names: Vec<String> = bm7
         .tree
         .iter()
