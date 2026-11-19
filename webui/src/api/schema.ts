@@ -1508,6 +1508,8 @@ export interface components {
         Maintenance: {
             version: string;
             online: boolean;
+            /** @enum {string} */
+            deployment?: "container";
             job?: components["schemas"]["MaintenanceJob"];
         };
         MaintenanceJob: {

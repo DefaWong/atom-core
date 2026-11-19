@@ -5,7 +5,7 @@ import AppModal from '../components/AppModal.vue'
 import SettingsTabs from '../components/SettingsTabs.vue'
 import ResetCard from '../components/ResetCard.vue'
 import UpdateCard from '../components/UpdateCard.vue'
-import { maintenance } from '../composables/maintenance'
+import { containerDeployment, maintenance } from '../composables/maintenance'
 import { usePoll } from '../composables/poll'
 import { backendName, backendVersion, isMihomo, status } from '../composables/status'
 import { toast } from '../composables/toast'
@@ -30,7 +30,8 @@ usePoll(loadStates, 10000)
 // The proxy kernel's row only once the current kernel is known.
 const kernel = computed<Service | null>(() => (status.value?.backend ? (isMihomo.value ? 'atom-mihomo' : 'atom-sing-box') : null))
 const rows = computed<{ service: Service; name: string; version: string }[]>(() => [
-  { service: 'atom-maintenance', name: 'Atom 维护服务', version: maintenance.value?.version ?? '' },
+  // The container has no separate maintenance service: its entry process answers for it.
+  ...(containerDeployment.value ? [] : [{ service: 'atom-maintenance' as Service, name: 'Atom 维护服务', version: maintenance.value?.version ?? '' }]),
   { service: 'atom-dns', name: 'AtomDNS', version: status.value?.atomdns.version ?? '' },
   ...(kernel.value ? [{ service: kernel.value, name: backendName.value, version: backendVersion.value }] : [])
 ])

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { call, client, describe } from '../api/client'
-import { acceptMaintenanceJob, maintenance, maintenanceBusy, maintenanceError, phaseLabels, refreshMaintenance } from '../composables/maintenance'
+import { acceptMaintenanceJob, containerDeployment, maintenance, maintenanceBusy, maintenanceError, phaseLabels, refreshMaintenance } from '../composables/maintenance'
 
 const job = computed(() => maintenance.value?.job)
 const checking = ref(false)
@@ -37,7 +37,7 @@ async function update(kind: 'check' | 'upgrade') {
       <span class="sp"></span>
       <span v-if="maintenance" class="mono">Atom v{{ maintenance.version }}</span>
     </div>
-    <div v-if="maintenance && !maintenance.online" class="t2">当前安装包未配置在线升级。</div>
+    <div v-if="maintenance && !maintenance.online && !containerDeployment" class="t2">当前安装包未配置在线升级。</div>
     <div v-if="updateJob" aria-live="polite">
       <div v-if="latest">可升级至 Atom v{{ latest }}</div>
       <div v-else-if="updateJob.kind === 'check' && updateJob.phase === 'success'">未发现可升级版本</div>

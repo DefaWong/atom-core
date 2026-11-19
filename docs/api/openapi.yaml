@@ -3166,6 +3166,9 @@ components:
       properties:
         version: {type: string}
         online: {type: boolean}
+        deployment:
+          type: string
+          enum: [container]
         job:
           $ref: "#/components/schemas/MaintenanceJob"
     MaintenanceJob:

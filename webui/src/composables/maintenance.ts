@@ -1,9 +1,12 @@
 import { computed, ref } from 'vue'
 import { call, client, describe, type Schemas } from '../api/client'
+import { isContainer } from '../deployment'
 import { singleFlight } from '../flight'
 
 export const maintenance = ref<Schemas['Maintenance'] | null>(null)
 export const maintenanceError = ref('')
+/** The container version is updated by a new image and its network is changed outside the panel. */
+export const containerDeployment = computed(() => isContainer(maintenance.value))
 export const maintenanceBusy = computed(() => {
   const job = maintenance.value?.job
   return job !== undefined && (!job.done || job.blocking)

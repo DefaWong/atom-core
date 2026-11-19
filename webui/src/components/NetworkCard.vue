@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { call, client, describe, type Schemas } from '../api/client'
-import { acceptMaintenanceJob, maintenance, maintenanceBusy, phaseLabels, refreshMaintenance, refreshMaintenanceNow } from '../composables/maintenance'
+import { acceptMaintenanceJob, containerDeployment, maintenance, maintenanceBusy, phaseLabels, refreshMaintenance, refreshMaintenanceNow } from '../composables/maintenance'
 
 const job = computed(() => maintenance.value?.job)
 const networkError = ref('')
@@ -88,7 +88,7 @@ async function confirmNetwork() {
     <div class="hd" style="margin: 0">
       <h2>网络</h2>
       <span class="sp"></span>
-      <button v-if="form" type="submit" class="btn pri sm" :disabled="!networkChanged || networkBusy || maintenanceBusy">试用并保存</button>
+      <button v-if="form && !containerDeployment" type="submit" class="btn pri sm" :disabled="!networkChanged || networkBusy || maintenanceBusy">试用并保存</button>
     </div>
     <div v-if="networkJob" class="grid" style="gap: 7px" aria-live="polite">
       <div>{{ phaseLabels[networkJob.phase] }}</div>
@@ -110,7 +110,7 @@ async function confirmNetwork() {
       <button v-if="!maintenanceBusy" type="button" class="btn sm" @click="loadNetwork">重新读取</button>
     </div>
 
-    <fieldset v-if="form && view" :disabled="networkBusy || maintenanceBusy" class="network-fields grid">
+    <fieldset v-if="form && view" :disabled="containerDeployment || networkBusy || maintenanceBusy" class="network-fields grid">
       <div class="field">
         <label for="atom-topology">拓扑</label>
         <select id="atom-topology" v-model="form.topology" class="inp" @change="setTopology">
