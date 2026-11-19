@@ -6,9 +6,10 @@ import NodeModal from '../components/NodeModal.vue'
 import ProviderModal from '../components/ProviderModal.vue'
 import { limited, testNode, testPoolNode, testing } from '../composables/delay'
 import { usePoll } from '../composables/poll'
-import { FINAL, final, groups, loadPool, loadProviders, loadProxy, loadRuntime, membersOf, nameOf, nodes, poolNodes, providers, providerUpdated, reportFailure, runtime, version, type Node, type Provider } from '../composables/proxy'
+import { FINAL, final, groups, loadPool, loadProviders, loadProxy, loadRuntime, nameOf, nodes, poolNodes, providers, providerUpdated, reportFailure, runtime, version, type Node, type Provider } from '../composables/proxy'
 import { isMihomo, refreshStatus } from '../composables/status'
 import { toast } from '../composables/toast'
+import { emptiedBy } from '../emptied'
 import { ago, latency, type Latency } from '../format'
 
 const error = ref('')
@@ -157,21 +158,22 @@ function invertShown() {
   }
   picked.value = next
 }
-const timedOut = computed(() => items.value.filter((item) => item.node && item.kind === 'bad'))
+// Among the nodes the current search and source show, like 全选 and 反选.
+const timedOut = computed(() => shownManual.value.filter((item) => item.kind === 'bad'))
 const pickTimedOut = () => (picked.value = new Set([...picked.value, ...timedOut.value.map((item) => item.id)]))
-/** What the deletion does: the groups (and Final) the picked nodes leave, and those left with no member. */
+/** What the deletion does: the groups (and Final) the picked nodes leave, and those left with no direct member. */
 const batchSummary = computed(() => {
   const ids = picked.value
   const left = new Set<string>()
   for (const node of nodes.value) if (ids.has(node.id)) for (const group of node.groups) left.add(group)
   if (final.value?.members.some((id) => ids.has(id))) left.add(FINAL)
-  const emptied: string[] = []
-  for (const group of groups.value) {
-    const members = membersOf(group)
-    const fromProviders = group.all_providers || (group.providers?.length ?? 0) > 0
-    if (!group.empty && !fromProviders && members.length && members.every((id) => ids.has(id))) emptied.push(group.id)
-  }
-  if (final.value && final.value.members.length && final.value.members.every((id) => ids.has(id))) emptied.push(FINAL)
+  const emptied = emptiedBy(ids, {
+    groups: groups.value,
+    final: final.value,
+    inactive: new Set(nodes.value.filter((node) => node.active === false).map((node) => node.id)),
+    providers: providers.value.map((provider) => provider.id),
+    mihomo: isMihomo.value
+  })
   return { left: [...left].map(nameOf), emptied: emptied.map(nameOf) }
 })
 async function removePicked() {
@@ -384,7 +386,7 @@ function closeProvider() {
   <AppModal v-if="confirmingBatch" :title="`删除 ${picked.size} 个节点`" @close="confirmingBatch = false">
     <div>将删除选中的 {{ picked.size }} 个手动节点，此操作不可撤销。</div>
     <div v-if="batchSummary.left.length" class="hint">它们会从 {{ batchSummary.left.join('、') }} 中移除。</div>
-    <div v-if="batchSummary.emptied.length" class="hint" style="color: var(--bad)">删除后这些组将没有成员：{{ batchSummary.emptied.join('、') }}</div>
+    <div v-if="batchSummary.emptied.length" class="hint" style="color: var(--bad)">删除后以下组将没有直接成员：{{ batchSummary.emptied.join('、') }}</div>
     <template #footer>
       <button class="btn" type="button" @click="confirmingBatch = false">取消</button>
       <button class="btn red" type="button" :disabled="busy" @click="removePicked">删除</button>
