@@ -2,7 +2,7 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { call, client, describe } from '../api/client'
 import AppModal from './AppModal.vue'
-import { acceptMaintenanceJob, maintenance, maintenanceBusy, phaseLabels, refreshMaintenance } from '../composables/maintenance'
+import { acceptMaintenanceJob, containerDeployment, maintenance, maintenanceBusy, phaseLabels, refreshMaintenance } from '../composables/maintenance'
 import { RESET_WORD, wizardURL } from '../reset'
 import { pollSequentially } from '../flight'
 
@@ -85,7 +85,7 @@ async function reset() {
       <li>删除全部规则、节点、订阅、DNS 上游和其他设置，包括面板登录。</li>
       <li>还原安装时改过的系统设置，移除 Atom 的服务和防火墙规则。</li>
       <li>从开始重置到安装向导完成前，局域网的 DNS 和代理不可用，网络会中断。</li>
-      <li>当前数据先备份到 <span class="mono">/opt/atom/backup/reset-时间</span>，不会自动恢复。</li>
+      <li>当前数据先备份到 <span class="mono">{{ containerDeployment ? '/opt/atom/data/.atom/backup' : '/opt/atom/backup' }}/reset-时间</span>，不会自动恢复。</li>
       <li>确认后跳转到安装向导，在浏览器打开向导后才开始重置；3 分钟内没有打开则取消。重置后 30 分钟内没有完成安装，将按原来的网络、面板端口和登录，其余用默认配置自动安装。</li>
     </ul>
     <form class="field" @submit.prevent="reset">
