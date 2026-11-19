@@ -851,6 +851,25 @@ fn each_change_empties_only_the_caches_it_touches() {
     assert_eq!(domestic["upstreams"][0]["tag"], "up2", "{stats}");
     assert!(domestic["upstreams"][0]["queries"].is_u64(), "{stats}");
     assert!(groups.iter().any(|group| group["tag"] == "nocnfake"), "{stats}");
+
+    // The counters back to zero; the entries stay.
+    fill();
+    let counters = || {
+        let (_, view) = host.call("GET", "caches", &Value::Null);
+        view["caches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| (item["queries"].as_u64().unwrap(), item["hits"].as_u64().unwrap()))
+            .collect::<Vec<_>>()
+    };
+    assert!(counters().iter().any(|(queries, _)| *queries > 0), "{:?}", counters());
+    let before = entries();
+    let (status, value) = host.call("POST", "stats/reset", &Value::Null);
+    assert_eq!(status, 200, "{value}");
+    assert!(counters().iter().all(|counts| *counts == (0, 0)), "{:?}", counters());
+    assert_eq!(entries(), before);
+    assert_eq!(host.call("GET", "stats/reset", &Value::Null).0, 405);
 }
 
 /// `requery`: the schedule is read and changed through the atom API.

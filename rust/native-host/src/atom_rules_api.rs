@@ -164,6 +164,7 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("GET", "caches"),
     ("POST", "caches/{tag}/flush"),
     ("GET", "stats/upstreams"),
+    ("POST", "stats/reset"),
     ("GET", "learning"),
     ("POST", "learning/{key}/flush"),
     ("GET", "requery"),

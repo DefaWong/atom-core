@@ -775,6 +775,14 @@ impl NativeCacheAdapter {
         Ok(self.cache.snapshot(self.clock.now_seconds()?))
     }
 
+    /// Sets the query and hit counters back to zero (atom `POST
+    /// stats/reset`); the entries stay.
+    pub(crate) fn reset_counters(&self) {
+        self.owner.queries.set(0);
+        self.owner.hits.set(0);
+        self.owner.lazy_hits.set(0);
+    }
+
     pub(crate) fn metrics(&self) -> Result<[u64; 4], CacheAdapterError> {
         Ok([
             self.owner.queries.get(),

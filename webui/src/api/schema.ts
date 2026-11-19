@@ -1039,7 +1039,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Counters of every upstream since the process started
+         * Counters of every upstream since the process started or the latest stats/reset
          * @description By group in the configuration's order (the FakeIP group `nocnfake`
          *     too); only upstreams with a tag have counters. `errors` counts
          *     failures and timeouts; `winners` the answers that became the group's.
@@ -1047,6 +1047,28 @@ export interface paths {
         get: operations["getUpstreamStats"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/stats/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Set the cache and upstream counters back to zero
+         * @description The named caches' `queries`, `hits` and `lazy_hits` (`GET caches`) and every upstream's
+         *     counters (`GET stats/upstreams`). Cached entries stay; the query log is cleared with
+         *     `POST audit/clear`.
+         */
+        post: operations["resetStats"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4554,6 +4576,31 @@ export interface operations {
                 };
             };
             404: components["responses"]["Error"];
+            503: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    resetStats: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Reset. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        ok: boolean;
+                    };
+                };
+            };
+            405: components["responses"]["MethodNotAllowed"];
             503: components["responses"]["Error"];
             default: components["responses"]["Error"];
         };

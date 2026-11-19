@@ -146,7 +146,7 @@ function openRank(kind: 'domain' | 'client' | 'set', item: { key: string; count:
 </script>
 
 <template>
-  <DnsTabs />
+  <DnsTabs @reset="load" />
   <div v-if="error" class="err">{{ error }}</div>
   <div class="grid g4">
     <div v-for="card in cards" :key="card[0]" class="card">

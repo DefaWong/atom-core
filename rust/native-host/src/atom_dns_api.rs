@@ -93,6 +93,10 @@ pub(crate) async fn handle(
             Some(control) => reply_json(200, &upstream_stats(config, control)),
             None => error(503, "runtime control is unavailable"),
         },
+        ("POST", ["stats", "reset"]) => match control {
+            Some(control) => reset_stats(config, cache, control),
+            None => error(503, "runtime control is unavailable"),
+        },
         ("GET", ["learning"]) => learning_view(config).await,
         ("POST", ["learning", key, "flush"]) => flush_learning(config, key).await,
         ("GET", ["requery"]) => requery_view(config).await,
@@ -101,7 +105,9 @@ pub(crate) async fn handle(
         (_, ["dns" | "upstreams" | "rewrite", ..])
         | (_, ["caches" | "learning" | "requery"])
         | (_, ["caches" | "learning", _, "flush"])
-        | (_, ["stats", "upstreams"] | ["requery", "trigger"]) => error(405, "method not allowed"),
+        | (_, ["stats", "upstreams" | "reset"] | ["requery", "trigger"]) => {
+            error(405, "method not allowed")
+        }
         (_, ["caches" | "stats" | "learning" | "requery", ..]) => error(404, "not found"),
         _ => return None,
     })
@@ -825,6 +831,21 @@ fn upstream_stats(config: &CompiledConfig, control: &RuntimeControl) -> Value {
         })
         .collect();
     json!({ "groups": groups })
+}
+
+/// `POST stats/reset`: the named caches' query and hit counters and every
+/// upstream's counters back to zero (the query log has its own
+/// `audit/clear`).
+fn reset_stats(config: &CompiledConfig, cache: &CacheCatalog, control: &RuntimeControl) -> Reply {
+    for item in &config.caches {
+        if item.kind == crate::config::CacheKind::Named
+            && let Some(store) = cache.get(item.id)
+        {
+            store.reset_counters();
+        }
+    }
+    control.observer().reset_upstream_counters();
+    reply_json(200, &json!({ "ok": true }))
 }
 
 // ----- learning -------------------------------------------------------------

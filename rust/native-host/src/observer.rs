@@ -1545,6 +1545,16 @@ impl QueryObserver {
         state.evicted_total = 0;
     }
 
+    /// Sets every upstream's attempt counters back to zero (atom `POST
+    /// stats/reset`); the upstreams stay registered.
+    pub(crate) fn reset_upstream_counters(&self) {
+        let mut state = self.lock();
+        for counters in state.metrics.forward_attempts_by_upstream.values_mut() {
+            *counters = UpstreamAttemptMetricsSnapshot::default();
+        }
+        state.metrics.unknown_forward_attempts_total = 0;
+    }
+
     pub(crate) fn set_audit_capacity(&self, capacity: usize) {
         let mut state = self.lock();
         state.audit_capacity = capacity;
@@ -2629,6 +2639,16 @@ mod tests {
                 .expect("route-a metrics")
                 .canceled_total,
             1
+        );
+        // atom `POST stats/reset`: zero, still registered.
+        observer.reset_upstream_counters();
+        let metrics = observer.metrics_snapshot();
+        assert_eq!(metrics.forward_attempts_by_upstream.len(), 2);
+        assert!(
+            metrics
+                .forward_attempts_by_upstream
+                .values()
+                .all(|counters| *counters == super::UpstreamAttemptMetricsSnapshot::default())
         );
     }
 
