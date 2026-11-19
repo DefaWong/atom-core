@@ -149,6 +149,40 @@ onMounted(async () => {
   }
 })
 
+// The learning table's numbers while 编辑 is on: capacity and lifetime (hours) per category.
+const editingLimits = ref(false)
+const limits = reactive<Record<string, { max: string; hours: string }>>({})
+function editLimits() {
+  for (const item of learning.value?.categories ?? []) limits[item.key] = { max: String(item.max_entries), hours: String(+(item.ttl_seconds / 3600).toFixed(4)) }
+  editingLimits.value = true
+}
+/** The changed numbers, or why they cannot be saved. */
+function limitsPatch(): { limits: Record<string, { max_entries?: number; ttl_seconds?: number }>; error: string } {
+  const out: Record<string, { max_entries?: number; ttl_seconds?: number }> = {}
+  if (!editingLimits.value) return { limits: out, error: '' }
+  let error = ''
+  for (const item of learning.value?.categories ?? []) {
+    const edit = limits[item.key]
+    if (!edit) continue
+    const name = LEARN[item.key as LearnKey] ?? item.label
+    const max = Number(edit.max.trim())
+    const ttl = Math.round(Number(edit.hours.trim()) * 3600)
+    if (!Number.isInteger(max) || max < 1 || max > 262144) error ||= `「${name}」的上限应为 1–262144 的整数`
+    else if (max !== item.max_entries) (out[item.key] ??= {}).max_entries = max
+    if (!edit.hours.trim() || !Number.isFinite(ttl) || ttl < 60 || ttl > 315360000) error ||= `「${name}」的有效期应为 1 分钟到 10 年（按小时填写）`
+    else if (ttl !== item.ttl_seconds) (out[item.key] ??= {}).ttl_seconds = ttl
+  }
+  return { limits: out, error }
+}
+/** "No IPv4" is learned only by the periodic re-query: it must outlive the interval while that runs. */
+function noV4Error(): string {
+  const interval = requery.value?.enabled ? requery.value.interval_minutes : 0
+  const row = learning.value?.categories.find((item) => item.key === 'no_v4')
+  if (!interval || !row || !form.learning.enabled || !form.learning.no_v4) return ''
+  const ttl = limitsPatch().limits.no_v4?.ttl_seconds ?? row.ttl_seconds
+  return ttl > interval * 60 ? '' : `「记忆无 V4」只在定期刷新时学到，有效期必须长于刷新间隔（${interval} 分钟）`
+}
+
 // Only what changed is sent (the last write wins: `dns` carries no version).
 function patchOf(part: Part): Schemas['DnsPatch'] {
   const current = dns.value
@@ -156,8 +190,12 @@ function patchOf(part: Part): Schemas['DnsPatch'] {
   const patch: Record<string, unknown> = {}
   for (const key of PARTS[part]) {
     if (key === 'learning') {
-      const changed = Object.entries(form.learning).filter(([name, value]) => value !== !!current.learning?.[name as keyof Schemas['Learning']])
-      if (changed.length) patch.learning = Object.fromEntries(changed)
+      const changed: Record<string, unknown> = Object.fromEntries(
+        Object.entries(form.learning).filter(([name, value]) => value !== !!current.learning?.[name as keyof Schemas['Learning']])
+      )
+      const numbers = limitsPatch().limits
+      if (Object.keys(numbers).length) changed.limits = numbers
+      if (Object.keys(changed).length) patch.learning = changed
     } else if (key === 'ecs') {
       if (form.ecs.trim() !== current.ecs) patch.ecs = form.ecs.trim()
     } else if (form[key] !== current[key]) {
@@ -169,10 +207,18 @@ function patchOf(part: Part): Schemas['DnsPatch'] {
 const changed = (part: Part) => Object.keys(patchOf(part)).length > 0
 
 async function saveDns(part: Part) {
-  busy.value = part
   errors[part] = ''
+  if (part === 'learning') {
+    const invalid = limitsPatch().error || noV4Error()
+    if (invalid) {
+      errors.learning = invalid
+      return
+    }
+  }
+  busy.value = part
   try {
     fillDns(await call(client.PUT('/dns', { body: patchOf(part) })), [part])
+    if (part === 'learning') editingLimits.value = false
     toast('ok', '已保存')
     // A cache switch turned off emptied its caches, a learning switch its list.
     const [cachesNow, learningNow] = await Promise.allSettled([loadCaches(), loadLearning()])
@@ -517,7 +563,9 @@ async function saveRewrite() {
         <div class="hd" style="margin: 0">
           <h2>域名学习</h2>
           <span class="sp"></span>
-          <button class="btn sm pri" type="button" :disabled="!!busy || !changed('learning')" @click="saveDns('learning')">保存</button>
+          <button v-if="editingLimits" class="btn sm" type="button" @click="editingLimits = false">取消编辑</button>
+          <button v-else class="btn sm" type="button" :disabled="!learning?.categories.length" @click="editLimits">编辑</button>
+          <button class="btn sm pri" type="button" :disabled="!!busy || (!changed('learning') && !limitsPatch().error)" @click="saveDns('learning')">保存</button>
         </div>
         <div class="row">
           <div style="flex: 1">学习</div>
@@ -526,11 +574,24 @@ async function saveRewrite() {
         <div class="tblwrap">
           <table>
             <thead>
-              <tr><th>类别</th><th>开关</th><th class="num">条数</th><th class="num">上限</th><th>有效期</th><th></th></tr>
+              <tr><th>类别</th><th class="num">条数</th><th class="num">上限</th><th>有效期</th><th></th><th>开关</th></tr>
             </thead>
             <tbody>
               <tr v-for="item in learnRows" :key="item.key" :class="{ off: !form.learning.enabled }">
                 <td>{{ item.name }}</td>
+                <td class="num tnum">{{ item.entries.toLocaleString() }}</td>
+                <td class="num tnum">
+                  <input v-if="editingLimits && limits[item.key]" v-model="limits[item.key].max" class="inp sm mono" style="width: 100px" inputmode="numeric" :aria-label="`${item.name}上限`" autocomplete="off" />
+                  <template v-else>{{ item.max_entries.toLocaleString() }}</template>
+                </td>
+                <td>
+                  <span v-if="editingLimits && limits[item.key]" class="row" style="gap: 6px; flex-wrap: nowrap">
+                    <input v-model="limits[item.key].hours" class="inp sm mono" style="width: 90px" inputmode="decimal" :aria-label="`${item.name}有效期（小时）`" autocomplete="off" />
+                    <span class="t2">小时</span>
+                  </span>
+                  <template v-else>{{ span(item.ttl_seconds) }}</template>
+                </td>
+                <td><button class="btn sm danger" type="button" @click="clearLearned(item)">清空</button></td>
                 <td>
                   <button
                     class="sw"
@@ -541,10 +602,6 @@ async function saveRewrite() {
                     @click="form.learning[item.key as LearnKey] = !form.learning[item.key as LearnKey]"
                   ></button>
                 </td>
-                <td class="num tnum">{{ item.entries.toLocaleString() }}</td>
-                <td class="num tnum">{{ item.max_entries.toLocaleString() }}</td>
-                <td>{{ span(item.ttl_seconds) }}</td>
-                <td><button class="btn sm danger" type="button" @click="clearLearned(item)">清空</button></td>
               </tr>
             </tbody>
           </table>

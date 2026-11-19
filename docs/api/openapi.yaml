@@ -4371,7 +4371,37 @@ components:
           type: string
           description: The ECS address of foreign queries ("" restores the default).
         learning:
-          $ref: "#/components/schemas/Learning"
+          $ref: "#/components/schemas/LearningPatch"
+    LearningPatch:
+      type: object
+      additionalProperties: false
+      description: |
+        The switches of `Learning`, and `limits`: per category key, its capacity and how long a
+        name is kept (`ttl_seconds`, 60 to 315360000). While the periodic re-query runs, `no_v4`
+        (learned only by it) must be kept longer than its interval (400 otherwise).
+      properties:
+        enabled:
+          type: boolean
+        remember_direct:
+          type: boolean
+        remember_proxy:
+          type: boolean
+        no_v4:
+          type: boolean
+        no_v6:
+          type: boolean
+        limits:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties: false
+            properties:
+              max_entries:
+                type: integer
+                minimum: 1
+              ttl_seconds:
+                type: integer
+                minimum: 60
     Dns:
       allOf:
         - $ref: "#/components/schemas/DnsPatch"

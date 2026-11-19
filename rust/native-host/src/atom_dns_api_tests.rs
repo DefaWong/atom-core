@@ -937,3 +937,71 @@ fn requery_schedule_and_learning_are_open() {
     let (status, _) = host.call("POST", "learning/nope/flush", &Value::Null);
     assert_eq!(status, 404);
 }
+
+/// The learning table's numbers: `PUT dns` `learning.limits` stores a
+/// category's capacity and lifetime (only differences from the YAML), the
+/// learner runs with them, and "no IPv4" must outlive the re-query interval
+/// while that runs.
+#[test]
+fn learning_limits_are_saved_and_no_v4_outlives_the_requery_interval() {
+    let host = Host::new("learning-limits");
+    let path = host.root.join("config.yaml");
+    std::fs::write(
+        host.root.join("webinfo/requery.json"),
+        r#"{"scheduler": {"enabled": true, "interval_minutes": 60}}"#,
+    )
+    .unwrap();
+    let yaml = std::fs::read_to_string(&path).unwrap().replace(
+        "  - tag: entry\n",
+        "  - tag: unified\n    type: domain_mapper\n    args: {rules: []}\n  - tag: route_learner\n    type: route_learner\n    args:\n      target_mapper: unified\n      file: gen/route_learner.json\n      categories:\n        - {tag: my_realiplist, mark: 11, label: DIRECT, ttl: 86400, max_entries: 100}\n        - {tag: my_nov4list, mark: 12, label: NOV4, ttl: 7200, max_entries: 100}\n  - tag: refresh\n    type: requery\n    args: {file: webinfo/requery.json}\n  - tag: entry\n",
+    );
+    std::fs::write(&path, yaml).unwrap();
+    let host = Host {
+        root: host.root.clone(),
+        host: crate::HostAssembly::from_config_file_in(&path, None).expect("config"),
+    };
+    let category = |key: &str| {
+        let (_, view) = host.call("GET", "learning", &Value::Null);
+        view["categories"].as_array().unwrap().iter().find(|item| item["key"] == key).cloned().unwrap()
+    };
+    assert_eq!(category("remember_direct")["max_entries"], 100);
+
+    let (status, value) = host.call(
+        "PUT",
+        "dns",
+        &json!({"learning": {"limits": {"remember_direct": {"max_entries": 500, "ttl_seconds": 172800}}}}),
+    );
+    assert_eq!(status, 200, "{value}");
+    let direct = category("remember_direct");
+    assert_eq!((direct["max_entries"].as_u64(), direct["ttl_seconds"].as_u64()), (Some(500), Some(172_800)), "{direct}");
+    let stored: Value = serde_json::from_slice(&std::fs::read(host.root.join("webinfo/settings.json")).unwrap()).unwrap();
+    assert_eq!(stored["learning"]["categories"]["my_realiplist"], json!({"ttl": 172800, "max_entries": 500}), "{stored}");
+
+    // Back to the YAML values: nothing stored.
+    let (status, value) = host.call(
+        "PUT",
+        "dns",
+        &json!({"learning": {"limits": {"remember_direct": {"max_entries": 100, "ttl_seconds": 86400}}}}),
+    );
+    assert_eq!(status, 200, "{value}");
+    let stored: Value = serde_json::from_slice(&std::fs::read(host.root.join("webinfo/settings.json")).unwrap()).unwrap();
+    assert!(stored.get("learning").is_none(), "{stored}");
+
+    for (body, wanted) in [
+        (json!({"remember_direct": {"max_entries": 0}}), "上限"),
+        (json!({"remember_direct": {"ttl_seconds": 10}}), "有效期"),
+        (json!({"nope": {"ttl_seconds": 600}}), "不存在"),
+        // Equal to the 60-minute interval: refused.
+        (json!({"no_v4": {"ttl_seconds": 3600}}), "记忆无 V4"),
+    ] {
+        let (status, value) = host.call("PUT", "dns", &json!({"learning": {"limits": body}}));
+        assert_eq!(status, 400, "{body}: {value}");
+        assert!(value["error"].as_str().unwrap().contains(wanted), "{body}: {value}");
+    }
+    let (status, value) = host.call("PUT", "dns", &json!({"learning": {"limits": {"no_v4": {"ttl_seconds": 3660}}}}));
+    assert_eq!(status, 200, "{value}");
+    assert_eq!(category("no_v4")["ttl_seconds"], 3660);
+    // With "no IPv4" off, its lifetime is not checked.
+    let (status, value) = host.call("PUT", "dns", &json!({"learning": {"no_v4": false, "limits": {"no_v4": {"ttl_seconds": 600}}}}));
+    assert_eq!(status, 200, "{value}");
+}

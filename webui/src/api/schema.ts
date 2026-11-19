@@ -2196,7 +2196,25 @@ export interface components {
             block_empty?: boolean;
             /** @description The ECS address of foreign queries ("" restores the default). */
             ecs?: string;
-            learning?: components["schemas"]["Learning"];
+            learning?: components["schemas"]["LearningPatch"];
+        };
+        /**
+         * @description The switches of `Learning`, and `limits`: per category key, its capacity and how long a
+         *     name is kept (`ttl_seconds`, 60 to 315360000). While the periodic re-query runs, `no_v4`
+         *     (learned only by it) must be kept longer than its interval (400 otherwise).
+         */
+        LearningPatch: {
+            enabled?: boolean;
+            remember_direct?: boolean;
+            remember_proxy?: boolean;
+            no_v4?: boolean;
+            no_v6?: boolean;
+            limits?: {
+                [key: string]: {
+                    max_entries?: number;
+                    ttl_seconds?: number;
+                };
+            };
         };
         Dns: components["schemas"]["DnsPatch"] & Record<string, never>;
         /** @description One upstream (more fields of AtomDNS's upstream entry are accepted and returned). */

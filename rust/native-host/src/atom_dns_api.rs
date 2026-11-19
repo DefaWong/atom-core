@@ -312,9 +312,49 @@ fn dns_settings(config: &CompiledConfig, mut patch: Map<String, Value>) -> Resul
             remember_proxy: Option<bool>,
             no_v4: Option<bool>,
             no_v6: Option<bool>,
+            /// Per category key: its capacity and how long a name is kept.
+            #[serde(default)]
+            limits: std::collections::BTreeMap<String, Limit>,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Limit {
+            max_entries: Option<u64>,
+            ttl_seconds: Option<u64>,
         }
         let patch: Patch =
             serde_json::from_value(raw).map_err(|e| format!("learning 无效: {e}"))?;
+        let cap = u64::try_from(crate::route_learner::MAX_ENTRIES_CAP).unwrap_or(u64::MAX);
+        let (low, high) = crate::config::settings::LEARNER_TTL_RANGE;
+        for (key, limit) in &patch.limits {
+            let Some((_, tag)) = CATEGORIES.iter().find(|(name, _)| name == key) else {
+                return Err(format!("学习类别 `{key}` 不存在"));
+            };
+            let Some((_, yaml)) = config
+                .yaml_defaults
+                .categories
+                .iter()
+                .find(|(name, _)| name == tag)
+            else {
+                return Err(format!("配置里没有学习类别 `{tag}`"));
+            };
+            let tuning = settings.learning.categories.entry((*tag).to_owned()).or_default();
+            if let Some(max) = limit.max_entries {
+                if !(1..=cap).contains(&max) {
+                    return Err(format!("{key} 的上限是 1 到 {cap}"));
+                }
+                tuning.max_entries = (max != yaml.max_entries).then_some(max);
+            }
+            if let Some(ttl) = limit.ttl_seconds {
+                if !(low..=high).contains(&ttl) {
+                    return Err(format!("{key} 的有效期是 {low} 到 {high} 秒"));
+                }
+                tuning.ttl = (ttl != yaml.ttl).then_some(ttl);
+            }
+            if tuning.max_entries.is_none() && tuning.ttl.is_none() {
+                settings.learning.categories.remove(*tag);
+            }
+        }
         let before = Learning::of(config);
         let after = Learning {
             enabled: patch.enabled.unwrap_or(before.enabled),
@@ -412,6 +452,7 @@ async fn put_dns(control: &RuntimeControl, body: &[u8]) -> Reply {
         Ok(patch) => patch,
         Err(reply) => return reply,
     };
+    let learning_changed = patch.contains_key("learning");
     let current = control.view();
     let DnsChange {
         settings,
@@ -422,6 +463,11 @@ async fn put_dns(control: &RuntimeControl, body: &[u8]) -> Reply {
         Ok(built) => built,
         Err(reason) => return error(400, reason),
     };
+    if learning_changed {
+        if let Err(reason) = check_no_v4_ttl(&current.config, &settings).await {
+            return error(400, reason);
+        }
+    }
     let unchanged = settings == current.config.settings;
     drop(current);
     if !unchanged {
@@ -463,6 +509,54 @@ async fn put_dns(control: &RuntimeControl, body: &[u8]) -> Reply {
         Ok(value) => reply_json(200, &value),
         Err(e) => error(500, e),
     }
+}
+
+/// "No IPv4" is learned only by the periodic re-query: while that runs, a
+/// name must outlive the interval, or it is gone before the next run can
+/// confirm it. Checked on the settings a `PUT dns` would publish.
+async fn check_no_v4_ttl(config: &CompiledConfig, settings: &Settings) -> Result<(), String> {
+    let Some((_, yaml)) = config
+        .yaml_defaults
+        .categories
+        .iter()
+        .find(|(tag, _)| tag == NO_V4)
+    else {
+        return Ok(());
+    };
+    let learning_on = settings.domain_generation.enabled.unwrap_or(true)
+        && settings
+            .domain_generation
+            .plugins
+            .get(NO_V4)
+            .map(|switch| switch.enabled)
+            .or_else(|| config.yaml_defaults.generation.get(NO_V4).copied())
+            .unwrap_or(true);
+    if !learning_on {
+        return Ok(());
+    }
+    let Ok(requery) = requery_of(config) else {
+        return Ok(());
+    };
+    let Ok(schedule) = requery_config(requery).await else {
+        return Ok(());
+    };
+    let scheduler = &schedule["scheduler"];
+    let minutes = scheduler["interval_minutes"].as_u64().unwrap_or(0);
+    if !scheduler["enabled"].as_bool().unwrap_or(false) || minutes == 0 {
+        return Ok(());
+    }
+    let ttl = settings
+        .learning
+        .categories
+        .get(NO_V4)
+        .and_then(|tuning| tuning.ttl)
+        .unwrap_or(yaml.ttl);
+    if ttl <= minutes.saturating_mul(60) {
+        return Err(format!(
+            "「记忆无 V4」只在定期刷新时学到，有效期（{ttl} 秒）必须长于刷新间隔（{minutes} 分钟）"
+        ));
+    }
+    Ok(())
 }
 
 /// Starts a `requery` task on the generation that was just published (a
