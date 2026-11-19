@@ -77,16 +77,14 @@ pub(crate) async fn fetch(
     if status == 200 {
         Ok(body)
     } else {
-        Err(format!("{BAD_STATUS}{status}"))
+        Err(format!("bad status: {status}"))
     }
 }
 
-const BAD_STATUS: &str = "bad status: ";
-
 /// [`fetch`] through `fetch.socks5`, then once more directly when the proxy
-/// itself failed (it may have no working node); a reply from the server (a
-/// bad status) is not retried, and a direct fetch is tried once. Both
-/// failures are in the error.
+/// itself failed (it may have no working node); a failure past the proxy
+/// (TLS, a bad status, a body over the limit) is not retried, and a direct
+/// fetch is tried once. Both failures are in the error.
 pub(crate) async fn fetch_or_direct(
     fetch_args: Fetch<'_>,
     cancel: &TransportCancellation,
@@ -94,6 +92,7 @@ pub(crate) async fn fetch_or_direct(
     if fetch_args.socks5.is_empty() {
         return fetch(fetch_args, cancel).await;
     }
+    let proxy_failure = format!("proxy {}: ", fetch_args.socks5);
     let direct = Fetch {
         socks5: "",
         roots: fetch_args.roots.clone(),
@@ -102,7 +101,10 @@ pub(crate) async fn fetch_or_direct(
     match fetch(fetch_args, cancel).await {
         Ok(bytes) => Ok(bytes),
         Err(_) if cancel.is_cancelled() => Err("canceled by shutdown".to_owned()),
-        Err(status) if status.starts_with(BAD_STATUS) => Err(status),
+        // Only a failure at the proxy itself (connecting to it, or its
+        // refusing the connection) is retried; anything past it is the
+        // server's answer.
+        Err(other) if !other.starts_with(&proxy_failure) => Err(other),
         Err(proxied) => fetch(direct, cancel)
             .await
             .map_err(|direct| format!("经代理: {proxied}；直连: {direct}")),
@@ -176,6 +178,7 @@ async fn call_once(url: &url::Url, call: &Call<'_>) -> Result<Reply, String> {
         atomdns_upstream_core::socks5::connect(call.socks5, &host, port)
             .await
             .map_err(|error| format!("proxy {}: {error}", call.socks5))?
+        // (`fetch_or_direct` reads this prefix as a failure at the proxy.)
     };
     let io: Box<dyn Io> = if https {
         Box::new(tls(tcp, &host, call.roots.clone()).await?)

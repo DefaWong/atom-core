@@ -453,13 +453,6 @@ async fn put_dns(control: &RuntimeControl, body: &[u8]) -> Reply {
         Err(reply) => return reply,
     };
     let learning_changed = patch.contains_key("learning");
-    // The `no_v4` lifetime is checked against the requery schedule: hold the
-    // schedule's writes from the check until the settings are applied.
-    let _schedule = if learning_changed {
-        Some(requery_writes().lock().await)
-    } else {
-        None
-    };
     let current = control.view();
     let DnsChange {
         settings,
@@ -521,18 +514,6 @@ async fn put_dns(control: &RuntimeControl, body: &[u8]) -> Reply {
 /// "No IPv4" is learned only by the periodic re-query: while that runs, a
 /// name must outlive the interval, or it is gone before the next run can
 /// confirm it. Checked on the settings a `PUT dns` would publish.
-/// Whether `no_v4` learns (the learning switch and its own).
-fn no_v4_learning(config: &CompiledConfig, settings: &Settings) -> bool {
-    settings.domain_generation.enabled.unwrap_or(true)
-        && settings
-            .domain_generation
-            .plugins
-            .get(NO_V4)
-            .map(|switch| switch.enabled)
-            .or_else(|| config.yaml_defaults.generation.get(NO_V4).copied())
-            .unwrap_or(true)
-}
-
 async fn check_no_v4_ttl(config: &CompiledConfig, settings: &Settings) -> Result<(), String> {
     let Ok(requery) = requery_of(config) else {
         return Ok(());
@@ -557,7 +538,7 @@ fn no_v4_outlives(
     enabled: bool,
     minutes: u64,
 ) -> Result<(), String> {
-    if !enabled || minutes == 0 || !no_v4_learning(config, settings) {
+    if !enabled || minutes == 0 {
         return Ok(());
     }
     let Some((_, yaml)) = config
@@ -1074,8 +1055,7 @@ async fn requery_view(config: &CompiledConfig) -> Reply {
     }
 }
 
-/// Serializes `PUT requery` (read, merge, store), and a learning change in
-/// `PUT dns` with it.
+/// Serializes `PUT requery` (read, merge, store).
 static REQUERY_WRITES: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
 
 fn requery_writes() -> &'static tokio::sync::Mutex<()> {
@@ -1126,8 +1106,7 @@ async fn put_requery(control: Option<&RuntimeControl>, config: &CompiledConfig, 
     if enabled && interval <= 0 {
         return error(400, "开启定期刷新要先设好间隔");
     }
-    // The settings as published now (`put_dns` holds this lock until its
-    // learning change is applied).
+    // The settings as published now.
     let view = control.map(RuntimeControl::view);
     let settings = view.as_ref().map_or(&config.settings, |view| &view.config.settings);
     if let Err(reason) =

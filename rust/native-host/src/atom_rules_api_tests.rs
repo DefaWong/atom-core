@@ -473,6 +473,10 @@ fn path_segments_are_decoded_after_the_split() {
     // A decoded `/` stays inside its segment; `+` is itself in a path.
     assert_eq!(path_segments("rulesets/a%2Fb+c"), ["rulesets", "a/b+c"]);
     assert_eq!(path_segments("upstreams/%E5%9B%BD%E5%86%85"), ["upstreams", "国内"]);
+    // Not UTF-8, or a broken escape: as written; U+FFFD itself decodes.
+    assert_eq!(path_segments("upstreams/%FF"), ["upstreams", "%FF"]);
+    assert_eq!(path_segments("upstreams/a%2"), ["upstreams", "a%2"]);
+    assert_eq!(path_segments("upstreams/%EF%BF%BD"), ["upstreams", "\u{fffd}"]);
     // The lease decision reads the same decoded segments as the dispatch: an
     // encoded `settings` still takes no outer lease.
     assert!(!mutates("PUT", "/api/v1/atom/%73ettings"));

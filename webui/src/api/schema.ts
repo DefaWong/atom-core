@@ -192,8 +192,10 @@ export interface paths {
          *     A builtin set (`refreshable: true`): every enabled source of it is
          *     downloaded again and the new lists are in use before the answer
          *     (`RefreshResult`). When no source could be downloaded, 502 with the
-         *     first failure's reason and the old lists stay. A download through
-         *     `main_proxy` that fails is tried once more directly.
+         *     first failure's reason and the old lists stay. A download whose
+         *     connection through `main_proxy` fails (at the proxy itself) is tried
+         *     once more directly; a TLS error, a bad status or a body over the limit
+         *     is not.
          */
         post: operations["refreshRuleset"];
         delete?: never;

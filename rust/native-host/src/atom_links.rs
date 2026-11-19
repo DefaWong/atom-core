@@ -991,11 +991,10 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
                     json!({"type": obfs, "password": raw(proxy, "obfs-password")}),
                 );
             }
+            // Zero (mihomo's "no limit") and what is not a whole Mbps are left
+            // out, as before these were read.
             for (source, target) in [("up", "up_mbps"), ("down", "down_mbps")] {
-                let value = text(proxy, source);
-                if !value.is_empty() {
-                    let mbps = clash_rate_mbps(&value)
-                        .ok_or_else(|| format!("{source} 不是有效速率"))?;
+                if let Some(mbps) = clash_rate_mbps(&text(proxy, source)) {
                     outbound.insert(target.into(), json!(mbps));
                 }
             }

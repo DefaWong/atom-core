@@ -722,6 +722,15 @@ fn an_exported_node_saves_back_unchanged() {
         assert_eq!(api.outbound(&hk), before, "{}", text["format"]);
     }
 
+    // A field the YAML edit changes but the importer does not read is refused,
+    // not dropped.
+    assert!(yaml.contains("udp: true"), "{yaml}");
+    let body = serde_json::json!({"format": "yaml", "content": yaml.replace("udp: true", "udp: false")});
+    let (status, refused) = api.call("PUT", &format!("/api/v1/atom/nodes/{hk}"), &body.to_string());
+    assert_eq!(status, 400, "{refused}");
+    assert!(refused["error"].as_str().unwrap().contains("udp"), "{refused}");
+    assert_eq!(api.outbound(&hk), before);
+
     // Hysteria2 bandwidth and a VLESS packet encoding come back from YAML; a
     // node the YAML cannot carry whole is offered only as JSON.
     let nodes = serde_json::json!([

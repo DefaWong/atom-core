@@ -17,19 +17,29 @@ const tabs = [
 const confirming = ref(false)
 const busy = ref(false)
 const error = ref('')
+// The log emptied in this dialog: a retry after the counters failed only resets them.
+const logCleared = ref(false)
+function open() {
+  confirming.value = true
+  error.value = ''
+  logCleared.value = false
+}
 // The statistics and rankings are computed from the query log; the cache and upstream
 // counters are kept apart, so both are emptied.
 async function reset() {
   busy.value = true
   error.value = ''
   try {
-    await call(client.POST('/audit/clear'))
+    if (!logCleared.value) {
+      await call(client.POST('/audit/clear'))
+      logCleared.value = true
+    }
     await call(client.POST('/stats/reset'))
     confirming.value = false
     toast('ok', '统计已重置')
     emit('reset')
   } catch (failure) {
-    error.value = describe(failure)
+    error.value = logCleared.value ? `日志已清空，计数清零失败：${describe(failure)}` : describe(failure)
   } finally {
     busy.value = false
   }
@@ -41,7 +51,7 @@ async function reset() {
     <nav class="tabs" aria-label="DNS">
       <RouterLink v-for="tab in tabs" :key="tab[0]" :to="tab[0]" :class="{ on: route.path === tab[0] }">{{ tab[1] }}</RouterLink>
     </nav>
-    <button v-if="route.path === '/dns'" class="btn sm" type="button" @click="((confirming = true), (error = ''))">重置统计</button>
+    <button v-if="route.path === '/dns'" class="btn sm" type="button" @click="open">重置统计</button>
   </div>
   <AppModal v-if="confirming" title="重置统计" @close="confirming = false">
     <div>将清空查询日志，并把缓存命中和上游统计清零，此操作不可撤销。</div>

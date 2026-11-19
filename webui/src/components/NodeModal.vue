@@ -69,11 +69,13 @@ onMounted(async () => {
  * Drops the edits and starts again from the node as saved now. Until its content is read, the
  * conflict stays (the old draft cannot be saved over the newer node).
  */
+let reloads = 0
 async function reload(current: Node) {
   const at = version.value
+  const ticket = ++reloads
   error.value = ''
   const text = await fetchContent(current.id)
-  if (!text) return
+  if (!text || ticket !== reloads) return
   useContent(text)
   base.value = current
   form.name = current.name
@@ -115,6 +117,7 @@ async function join(ids: string[]) {
 }
 
 async function submit(overwrite = false) {
+  reloads++
   error.value = ''
   if (overwrite) {
     if (conflict.value) base.value = conflict.value
@@ -206,8 +209,8 @@ async function submit(overwrite = false) {
     <div v-if="error" class="err">{{ error }}</div>
     <template #footer>
       <template v-if="conflict">
-        <button class="btn" type="button" :disabled="loading" @click="reload(conflict)">载入最新内容</button>
-        <button class="btn red" type="button" :disabled="busy" @click="submit(true)">仍然保存</button>
+        <button class="btn" type="button" :disabled="busy || loading" @click="reload(conflict)">载入最新内容</button>
+        <button class="btn red" type="button" :disabled="busy || loading" @click="submit(true)">仍然保存</button>
       </template>
       <template v-else>
         <button class="btn" type="button" @click="emit('close')">取消</button>

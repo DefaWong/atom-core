@@ -538,19 +538,21 @@ fn list_catalog(rules: &AtomRules, query: Option<&str>) -> Reply {
     )
 }
 
-/// A query value: `+` is a space, `%XX` a byte.
-fn percent_decode(text: &str) -> String {
-    decode(text, true)
-}
-
 /// A path's segments, each percent-decoded after the split (a decoded `/`
 /// stays inside its segment; `+` is itself): the UI encodes IDs such as
 /// `bm7:Claude` as `bm7%3AClaude`.
+/// A segment that does not decode (a broken escape, not UTF-8) stays as
+/// written, so it names nothing.
 pub(crate) fn path_segments(rest: &str) -> Vec<String> {
-    rest.split('/').map(|segment| decode(segment, false)).collect()
+    rest.split('/')
+        .map(|segment| {
+            crate::api::decode_plugin_tag(segment).map_or_else(|| segment.to_owned(), |text| text.into_owned())
+        })
+        .collect()
 }
 
-fn decode(text: &str, plus_is_space: bool) -> String {
+/// A query value: `+` is a space, `%XX` a byte.
+fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -562,7 +564,7 @@ fn decode(text: &str, plus_is_space: bool) -> String {
                 .and_then(|d| u8::try_from(d).ok())
         };
         match bytes[i] {
-            b'+' if plus_is_space => out.push(b' '),
+            b'+' => out.push(b' '),
             b'%' => {
                 if let (Some(high), Some(low)) = (hex(i + 1), hex(i + 2)) {
                     out.push(high * 16 + low);

@@ -640,6 +640,9 @@ impl RuleSources {
             if let Some(hours) = edit.update_interval_hours {
                 entry.update_interval_hours = hours;
             }
+            if entry.auto_update && entry.update_interval_hours == 0 {
+                return Err((400, "开启自动更新要先设好更新周期".to_owned()));
+            }
             if repointed || before != (entry.auto_update, entry.update_interval_hours) {
                 save_manifest(provider, sources, "保存来源失败")
                     .await

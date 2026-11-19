@@ -385,6 +385,10 @@ async fn update_node(rules: &AtomRules, id: &str, bytes: &[u8]) -> Answer {
     // No content: the connection stays as it is. With content, the node is
     // replaced whole by it; `name` (or the current name) wins over the one
     // in the content.
+    let yaml = match (&update.format, &update.content) {
+        (Some(format), Some(Value::String(text))) if format == "yaml" => Some(text.clone()),
+        _ => None,
+    };
     let outbound = match (update.format, update.content) {
         (Some(format), Some(content)) => {
             let mut imported = parse_import(&format, content)?;
@@ -400,6 +404,9 @@ async fn update_node(rules: &AtomRules, id: &str, bytes: &[u8]) -> Answer {
     let node = next
         .update_node(id, update.name, outbound)
         .map_err(|e| fail(&e))?;
+    if let Some(text) = yaml {
+        unkept_yaml(&text, &node)?;
+    }
     next.version += 1;
     let version = next.version;
     rules
@@ -410,6 +417,60 @@ async fn update_node(rules: &AtomRules, id: &str, bytes: &[u8]) -> Answer {
         200,
         &json!({ "version": version, "node": node_view(&next, &next.inactive_nodes(), &node) }),
     ))
+}
+
+/// A YAML edit is saved as the sing-box outbound it reads as: refuses it
+/// when a field written in it does not come back the same from that outbound
+/// (the importer leaves it out or reads it another way).
+fn unkept_yaml(text: &str, node: &crate::atom_proxy::Node) -> Result<(), Reply> {
+    let written = match yaml_serde::from_str::<Value>(text) {
+        Ok(Value::Object(mut map)) if map.contains_key("proxies") => {
+            map.remove("proxies").and_then(|list| list.get(0).cloned())
+        }
+        Ok(Value::Array(list)) => list.first().cloned(),
+        Ok(value) => Some(value),
+        Err(_) => None,
+    };
+    let (Some(Value::Object(mut written)), Ok(saved)) = (written, crate::atom_mihomo::convert_proxy(node)) else {
+        return Ok(());
+    };
+    written.remove("name");
+    let mut lost = Vec::new();
+    unkept(&Value::Object(written), &saved, "", &mut lost);
+    if lost.is_empty() {
+        Ok(())
+    } else {
+        Err(error(400, format!("这些字段保存不了（导入时被忽略或改写）：{}", lost.join("、"))))
+    }
+}
+
+/// The paths in `written` that `saved` does not carry the same way; scalars
+/// compare as text, and a bare rate `n` is `n Mbps`.
+fn unkept(written: &Value, saved: &Value, path: &str, lost: &mut Vec<String>) {
+    let scalar = |value: &Value| match value {
+        Value::String(text) => Some(text.strip_suffix(" Mbps").filter(|n| n.bytes().all(|b| b.is_ascii_digit())).unwrap_or(text).to_owned()),
+        Value::Number(_) | Value::Bool(_) => Some(value.to_string()),
+        _ => None,
+    };
+    match (written, saved) {
+        (Value::Object(written), Value::Object(saved)) => {
+            for (key, value) in written {
+                let at = if path.is_empty() { key.clone() } else { format!("{path}.{key}") };
+                match saved.get(key) {
+                    Some(kept) => unkept(value, kept, &at, lost),
+                    None if value.is_null() => {}
+                    None => lost.push(at),
+                }
+            }
+        }
+        (Value::Array(written), Value::Array(saved)) if written.len() == saved.len() => {
+            for (index, (value, kept)) in written.iter().zip(saved).enumerate() {
+                unkept(value, kept, &format!("{path}[{index}]"), lost);
+            }
+        }
+        _ if scalar(written).is_some() && scalar(written) == scalar(saved) => {}
+        _ => lost.push(path.to_owned()),
+    }
 }
 
 async fn delete_node(rules: &AtomRules, id: &str, query: Option<&str>) -> Answer {

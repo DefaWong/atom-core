@@ -178,7 +178,7 @@ function limitsPatch(): { limits: Record<string, { max_entries?: number; ttl_sec
 function noV4Error(): string {
   const interval = requery.value?.enabled ? requery.value.interval_minutes : 0
   const row = learning.value?.categories.find((item) => item.key === 'no_v4')
-  if (!interval || !row || !form.learning.enabled || !form.learning.no_v4) return ''
+  if (!interval || !row) return ''
   const ttl = limitsPatch().limits.no_v4?.ttl_seconds ?? row.ttl_seconds
   return ttl > interval * 60 ? '' : `「记忆无 V4」只在定期刷新时学到，有效期必须长于刷新间隔（${interval} 分钟）`
 }
