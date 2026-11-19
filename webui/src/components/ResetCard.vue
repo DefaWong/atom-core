@@ -4,6 +4,7 @@ import { call, client, describe } from '../api/client'
 import AppModal from './AppModal.vue'
 import { acceptMaintenanceJob, maintenance, maintenanceBusy, phaseLabels, refreshMaintenance } from '../composables/maintenance'
 import { RESET_WORD, wizardURL } from '../reset'
+import { pollSequentially } from '../flight'
 
 const job = computed(() => maintenance.value?.job)
 const resetJob = computed(() => job.value?.kind === 'reset' ? job.value : undefined)
@@ -22,13 +23,14 @@ const wizard = computed(() => {
 const deadline = computed(() => resetJob.value?.deadline && !resetJob.value.done ?
   new Date(resetJob.value.deadline).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '')
 
-// The wizard is ready within seconds: follow the job faster than the shell's poll while it waits.
-let timer: ReturnType<typeof setInterval> | undefined
+// The wizard is ready within seconds: follow the job faster than the shell's poll while it waits. The next
+// request goes a second after the previous answer (shared with the shell's poll), so a slow one is never dropped.
+let stop: (() => void) | undefined
 watch(() => !!resetJob.value && !resetJob.value.done, (open) => {
-  clearInterval(timer)
-  timer = open ? setInterval(() => void refreshMaintenance(), 1000) : undefined
+  stop?.()
+  stop = open ? pollSequentially(refreshMaintenance, 1000) : undefined
 }, { immediate: true })
-onUnmounted(() => clearInterval(timer))
+onUnmounted(() => stop?.())
 
 watch(wizard, (url) => {
   if (url && mine.value === resetJob.value?.id) window.location.assign(url)

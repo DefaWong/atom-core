@@ -1,5 +1,6 @@
 import { computed, ref } from 'vue'
 import { call, client, describe, type Schemas } from '../api/client'
+import { singleFlight } from '../flight'
 
 export const maintenance = ref<Schemas['Maintenance'] | null>(null)
 export const maintenanceError = ref('')
@@ -8,24 +9,33 @@ export const maintenanceBusy = computed(() => {
   return job !== undefined && (!job.done || job.blocking)
 })
 
-let request = 0
-
-export async function refreshMaintenance() {
-  const mine = ++request
-  try {
-    const next = await call(client.GET('/maintenance'))
-    if (mine !== request) return
-    const previousVersion = maintenance.value?.version
-    maintenance.value = next
-    maintenanceError.value = ''
-    if (previousVersion && next.version !== previousVersion) window.location.reload()
-  } catch (failure) {
-    if (mine === request) maintenanceError.value = describe(failure)
+// One /maintenance request at a time: the shell's poll and the reset card's faster one share it, so a
+// slow answer is waited for rather than dropped for a newer request that would be just as slow.
+const flight = singleFlight(() => call(client.GET('/maintenance')), (outcome) => {
+  if (!outcome.ok) {
+    maintenanceError.value = describe(outcome.error)
+    return
   }
+  const next = outcome.value
+  const previousVersion = maintenance.value?.version
+  maintenance.value = next
+  maintenanceError.value = ''
+  if (previousVersion && next.version !== previousVersion) window.location.reload()
+})
+
+export function refreshMaintenance(): Promise<void> {
+  return flight.run()
 }
 
+/** After a change made here: an answer already in flight may predate it, so ask again. */
+export function refreshMaintenanceNow(): Promise<void> {
+  flight.invalidate()
+  return flight.run()
+}
+
+/** A job just started here: the answer in flight predates it, so it is dropped and the next refresh asks again. */
 export function acceptMaintenanceJob(job: Schemas['MaintenanceJob']) {
-  request++
+  flight.invalidate()
   if (maintenance.value) maintenance.value = { ...maintenance.value, job }
 }
 

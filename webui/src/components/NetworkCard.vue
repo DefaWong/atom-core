@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { call, client, describe, type Schemas } from '../api/client'
-import { acceptMaintenanceJob, maintenance, maintenanceBusy, phaseLabels, refreshMaintenance } from '../composables/maintenance'
+import { acceptMaintenanceJob, maintenance, maintenanceBusy, phaseLabels, refreshMaintenance, refreshMaintenanceNow } from '../composables/maintenance'
 
 const job = computed(() => maintenance.value?.job)
 const networkError = ref('')
@@ -75,7 +75,7 @@ async function confirmNetwork() {
   networkBusy.value = true
   try {
     await call(client.POST('/maintenance/confirm', { body: { id: networkJob.value.id } }))
-    await refreshMaintenance()
+    await refreshMaintenanceNow()
   } catch (failure) {
     networkError.value = describe(failure)
   } finally {
