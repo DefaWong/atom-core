@@ -146,10 +146,12 @@ export interface paths {
          * Rename, change the source, or replace a local list; a builtin set's address
          * @description A custom ruleset: any of `name`, the source (`type` with its fields)
          *     and `rules` (local rulesets only); a catalog set cannot be changed
-         *     (400). A builtin set: only `{url}`, the download address of its one
-         *     source (409 for a set with several, such as `adguard`; 400 for one
-         *     without), downloaded at once (502 when that fails, the address is
-         *     kept and the old list stays).
+         *     (400). A builtin set: `url`, `auto_update` and `update_interval_hours`
+         *     (1 to 8760) of its one source (409 for a set with several, such as
+         *     `adguard`; 400 for one without); the automatic update follows the
+         *     saved settings. A new address is downloaded at once (502 with the
+         *     first failure's reason when that fails, the address is kept and the
+         *     old list stays).
          */
         put: operations["updateRuleset"];
         post?: never;
@@ -189,8 +191,9 @@ export interface paths {
          *
          *     A builtin set (`refreshable: true`): every enabled source of it is
          *     downloaded again and the new lists are in use before the answer
-         *     (`RefreshResult`). When no source could be downloaded, 502 and the
-         *     old lists stay.
+         *     (`RefreshResult`). When no source could be downloaded, 502 with the
+         *     first failure's reason and the old lists stay. A download through
+         *     `main_proxy` that fails is tried once more directly.
          */
         post: operations["refreshRuleset"];
         delete?: never;
@@ -1870,6 +1873,10 @@ export interface components {
             url?: string;
             /** @description The last download (RFC 3339). */
             updated?: string;
+            /** @description Downloaded again automatically, for a set with one source. */
+            auto_update?: boolean;
+            /** @description Hours between automatic downloads, for a set with one source. */
+            update_interval_hours?: number;
             name: string;
             /** @enum {string} */
             type: "builtin";
@@ -1936,6 +1943,8 @@ export interface components {
             sources: number;
             /** @description Of those, the ones that replaced their list (a failed one is logged). */
             updated: number;
+            /** @description The first failed source and why, when some failed. */
+            error?: string;
         };
         Node: {
             /** @description `n-` and 8 hex digits; the sing-box tag. */
@@ -2665,6 +2674,10 @@ export interface operations {
                     format?: string;
                     category?: string;
                     rules?: string[];
+                    /** @description A builtin set only. */
+                    auto_update?: boolean;
+                    /** @description A builtin set only. */
+                    update_interval_hours?: number;
                 };
             };
         };

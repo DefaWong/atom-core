@@ -81,6 +81,30 @@ pub(crate) async fn fetch(
     }
 }
 
+/// [`fetch`] through `fetch.socks5`, then once more directly when that
+/// fails (the proxy may have no working node); a direct fetch is tried once.
+/// Both failures are in the error.
+pub(crate) async fn fetch_or_direct(
+    fetch_args: Fetch<'_>,
+    cancel: &TransportCancellation,
+) -> Result<Vec<u8>, String> {
+    if fetch_args.socks5.is_empty() {
+        return fetch(fetch_args, cancel).await;
+    }
+    let direct = Fetch {
+        socks5: "",
+        roots: fetch_args.roots.clone(),
+        ..fetch_args
+    };
+    match fetch(fetch_args, cancel).await {
+        Ok(bytes) => Ok(bytes),
+        Err(_) if cancel.is_cancelled() => Err("canceled by shutdown".to_owned()),
+        Err(proxied) => fetch(direct, cancel)
+            .await
+            .map_err(|direct| format!("经代理: {proxied}；直连: {direct}")),
+    }
+}
+
 /// Performs `call` and returns the final status and body (at most
 /// `max_bytes`; a longer body is an error).
 ///

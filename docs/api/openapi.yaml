@@ -418,10 +418,12 @@ paths:
       description: |
         A custom ruleset: any of `name`, the source (`type` with its fields)
         and `rules` (local rulesets only); a catalog set cannot be changed
-        (400). A builtin set: only `{url}`, the download address of its one
-        source (409 for a set with several, such as `adguard`; 400 for one
-        without), downloaded at once (502 when that fails, the address is
-        kept and the old list stays).
+        (400). A builtin set: `url`, `auto_update` and `update_interval_hours`
+        (1 to 8760) of its one source (409 for a set with several, such as
+        `adguard`; 400 for one without); the automatic update follows the
+        saved settings. A new address is downloaded at once (502 with the
+        first failure's reason when that fails, the address is kept and the
+        old list stays).
       operationId: updateRuleset
       requestBody:
         required: true
@@ -445,6 +447,14 @@ paths:
                   type: array
                   items:
                     type: string
+                auto_update:
+                  type: boolean
+                  description: A builtin set only.
+                update_interval_hours:
+                  type: integer
+                  minimum: 1
+                  maximum: 8760
+                  description: A builtin set only.
       responses:
         "200":
           description: Changed.
@@ -518,8 +528,9 @@ paths:
 
         A builtin set (`refreshable: true`): every enabled source of it is
         downloaded again and the new lists are in use before the answer
-        (`RefreshResult`). When no source could be downloaded, 502 and the
-        old lists stay.
+        (`RefreshResult`). When no source could be downloaded, 502 with the
+        first failure's reason and the old lists stay. A download through
+        `main_proxy` that fails is tried once more directly.
       operationId: refreshRuleset
       responses:
         "200":
@@ -3837,6 +3848,12 @@ components:
         updated:
           type: string
           description: The last download (RFC 3339).
+        auto_update:
+          type: boolean
+          description: Downloaded again automatically, for a set with one source.
+        update_interval_hours:
+          type: integer
+          description: Hours between automatic downloads, for a set with one source.
         name:
           type: string
         type:
@@ -3960,6 +3977,9 @@ components:
         updated:
           type: integer
           description: Of those, the ones that replaced their list (a failed one is logged).
+        error:
+          type: string
+          description: The first failed source and why, when some failed.
     Node:
       type: object
       required: [id, name, outbound, groups]

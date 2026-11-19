@@ -1495,6 +1495,15 @@ fn catalog_entries_become_managed_rulesets_while_rules_name_them() {
         409,
         "in use"
     );
+    // The UI sends the ID percent-encoded (`encodeURIComponent`).
+    let (status, shown) = api.call("GET", "/api/v1/atom/rulesets/bm7%3ATelegram", "");
+    assert_eq!((status, &shown["id"]), (200, &serde_json::json!("bm7:Telegram")), "{shown}");
+    assert_eq!(
+        api.call("PUT", "/api/v1/atom/rulesets/bm7%3ATelegram", r#"{"name": "x"}"#).0,
+        400
+    );
+    assert_eq!(api.call("DELETE", "/api/v1/atom/rulesets/bm7%3ATelegram", "").0, 409);
+    assert_eq!(api.call("GET", "/api/v1/atom/rulesets/bm7%3ANope", "").0, 404);
     let (status, _) = api.call("DELETE", &format!("/api/v1/atom/rules/{rule}"), "");
     assert_eq!(status, 200);
     assert!(rules.ruleset("bm7:Telegram").is_none(), "the last rule took its set along");

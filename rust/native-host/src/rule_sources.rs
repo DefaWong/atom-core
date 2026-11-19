@@ -501,14 +501,11 @@ impl RuleSources {
     // ----- sd_set_light / si_set / adguard_rule (atom builtin `refresh`) ----
 
     /// Downloads every enabled source of a rule provider again and rebuilds
-    /// its matchers before this returns. `(sources, updated)`: how many
-    /// sources were downloaded and how many of them replaced their file (a
-    /// failed download keeps the old file and is logged).
+    /// its matchers before this returns: how many sources were downloaded,
+    /// how many of them replaced their file (a failed download keeps the old
+    /// file and is logged) and the first failure (`source: reason`).
     /// The error is `(HTTP status, reason)`.
-    pub(crate) async fn refresh(
-        &self,
-        provider: &Rc<Provider>,
-    ) -> Result<(usize, usize), (u16, String)> {
+    pub(crate) async fn refresh(&self, provider: &Rc<Provider>) -> Result<Refreshed, (u16, String)> {
         if self.closed.get() {
             return Err((503, "host is applying configuration".to_owned()));
         }
@@ -525,6 +522,7 @@ impl RuleSources {
         };
         let ctx = self.ctx();
         let mut updated = 0;
+        let mut first_error = None;
         for key in &keys {
             // A download of this source already running (startup, or another
             // refresh) would make ours return at once without its outcome:
@@ -535,8 +533,12 @@ impl RuleSources {
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            if download_source(&ctx, provider, key.clone()).await {
-                updated += 1;
+            match download_source(&ctx, provider, key.clone()).await {
+                (true, _) => updated += 1,
+                (false, Some(error)) if first_error.is_none() => {
+                    first_error = Some(format!("{key}: {error}"));
+                }
+                _ => {}
             }
         }
         if updated > 0 {
@@ -544,57 +546,111 @@ impl RuleSources {
                 .await
                 .map_err(|error| (500, format!("下载成功，但重建失败，仍在用旧规则: {error}")))?;
         }
-        Ok((keys.len(), updated))
+        Ok(Refreshed {
+            sources: keys.len(),
+            updated,
+            first_error,
+        })
     }
 }
 
+/// What [`RuleSources::refresh`] did.
+pub(crate) struct Refreshed {
+    pub(crate) sources: usize,
+    pub(crate) updated: usize,
+    pub(crate) first_error: Option<String>,
+}
+
+/// A provider's one source as the atom UI edits it.
+pub(crate) struct SourceSettings {
+    pub(crate) url: String,
+    pub(crate) updated: Option<String>,
+    pub(crate) auto_update: bool,
+    pub(crate) update_interval_hours: i64,
+}
+
+/// What [`RuleSources::set_source`] changes (`None`: kept).
+#[derive(Default)]
+pub(crate) struct SourceEdit<'a> {
+    pub(crate) url: Option<&'a str>,
+    pub(crate) auto_update: Option<bool>,
+    pub(crate) update_interval_hours: Option<i64>,
+}
+
 impl RuleSources {
-    /// The download address of a provider's one source (atom builtin sets).
-    pub(crate) fn source_url(&self, provider: &Provider) -> Option<(String, Option<String>)> {
+    /// A provider's one source (atom builtin sets): its address, last
+    /// update and auto-update settings.
+    pub(crate) fn source_settings(&self, provider: &Provider) -> Option<SourceSettings> {
         let sources = provider.manifest.as_ref()?.sources.borrow();
         match sources.as_slice() {
-            [entry] => Some((entry.url.clone(), entry.last_updated.clone())),
+            [entry] => Some(SourceSettings {
+                url: entry.url.clone(),
+                updated: entry.last_updated.clone(),
+                auto_update: entry.auto_update,
+                update_interval_hours: entry.update_interval_hours,
+            }),
             _ => None,
         }
     }
 
-    /// Points a provider's one source at `url` (atom: `PUT rulesets/{id}`
-    /// of a builtin set), saves the manifest, then downloads it like
-    /// [`Self::refresh`]. A provider with several sources is refused (409).
-    pub(crate) async fn set_url(
+    /// Edits a provider's one source (atom: `PUT rulesets/{id}` of a builtin
+    /// set) and saves the manifest; the auto-update loop reads the new
+    /// settings from it ([`is_due`]). A new address is downloaded at once,
+    /// like [`Self::refresh`] (its outcome is returned); other edits download
+    /// nothing. A provider with several sources is refused (409).
+    pub(crate) async fn set_source(
         &self,
         provider: &Rc<Provider>,
-        url: &str,
-    ) -> Result<(usize, usize), (u16, String)> {
+        edit: SourceEdit<'_>,
+    ) -> Result<Option<Refreshed>, (u16, String)> {
         if self.closed.get() {
             return Err((503, "host is applying configuration".to_owned()));
         }
-        let parsed = url::Url::parse(url).map_err(|e| (400, format!("url 无效: {e}")))?;
-        if !matches!(parsed.scheme(), "http" | "https") {
-            return Err((400, "url 只支持 http 和 https".to_owned()));
+        if let Some(url) = edit.url {
+            let parsed = url::Url::parse(url).map_err(|e| (400, format!("url 无效: {e}")))?;
+            if !matches!(parsed.scheme(), "http" | "https") {
+                return Err((400, "url 只支持 http 和 https".to_owned()));
+            }
+        }
+        if let Some(hours) = edit.update_interval_hours
+            && !(1..=8760).contains(&hours)
+        {
+            return Err((400, "更新周期是 1 到 8760 小时".to_owned()));
         }
         let Some(owner) = provider.manifest.as_ref() else {
             return Err((400, "this set has no downloadable sources".to_owned()));
         };
-        {
+        let repointed = {
             let _guard = provider.mutate.lock().await;
             let mut sources = owner.sources.borrow().clone();
             let [entry] = sources.as_mut_slice() else {
                 return Err((
                     409,
-                    format!("{} 有 {} 个来源，不能整体改地址", provider.tag, sources.len()),
+                    format!("{} 有 {} 个来源，不能整体修改", provider.tag, sources.len()),
                 ));
             };
-            if entry.url == url {
-                drop(_guard);
-                return self.refresh(provider).await;
+            let repointed = edit.url.is_some_and(|url| entry.url != url);
+            let before = (entry.auto_update, entry.update_interval_hours);
+            if let Some(url) = edit.url {
+                url.clone_into(&mut entry.url);
             }
-            url.clone_into(&mut entry.url);
-            save_manifest(provider, sources, "保存来源失败")
-                .await
-                .map_err(|_| (500, "保存来源失败".to_owned()))?;
+            if let Some(auto) = edit.auto_update {
+                entry.auto_update = auto;
+            }
+            if let Some(hours) = edit.update_interval_hours {
+                entry.update_interval_hours = hours;
+            }
+            if repointed || before != (entry.auto_update, entry.update_interval_hours) {
+                save_manifest(provider, sources, "保存来源失败")
+                    .await
+                    .map_err(|_| (500, "保存来源失败".to_owned()))?;
+            }
+            repointed
+        };
+        if repointed {
+            return self.refresh(provider).await.map(Some);
         }
-        self.refresh(provider).await
+        Ok(None)
     }
 }
 
@@ -760,7 +816,7 @@ async fn download_many(ctx: &Ctx, provider: &Rc<Provider>, keys: Vec<String>) ->
     for key in keys {
         let ctx = ctx.clone();
         let provider = Rc::clone(provider);
-        tasks.spawn_local(async move { download_source(&ctx, &provider, key).await });
+        tasks.spawn_local(async move { download_source(&ctx, &provider, key).await.0 });
     }
     let mut any = false;
     while let Some(result) = tasks.join_next().await {
@@ -783,12 +839,14 @@ impl Drop for Flight<'_> {
 
 /// One source's download with single flight: a request for a source that is
 /// already downloading makes that download run once more and returns false.
-async fn download_source(ctx: &Ctx, provider: &Provider, key: String) -> bool {
+/// The error: why the latest attempt failed (`None` once one replaced the
+/// file).
+async fn download_source(ctx: &Ctx, provider: &Provider, key: String) -> (bool, Option<String>) {
     {
         let mut flights = provider.owner().flights.borrow_mut();
         if let Some(again) = flights.get_mut(&key) {
             *again = true;
-            return false;
+            return (false, None);
         }
         flights.insert(key.clone(), false);
     }
@@ -797,14 +855,21 @@ async fn download_source(ctx: &Ctx, provider: &Provider, key: String) -> bool {
         key: key.clone(),
     };
     let mut replaced = false;
+    let mut failure = None;
     loop {
         if ctx.cancel.is_cancelled() {
-            return replaced;
+            return (replaced, failure);
         }
         match attempt(ctx, provider, &key).await {
-            Ok(()) => replaced = true,
+            Ok(()) => {
+                replaced = true;
+                failure = None;
+            }
             Err(error) => {
                 crate::diag::error_line!("{}: failed to update '{key}': {error}", provider.tag);
+                if !replaced {
+                    failure = Some(error);
+                }
             }
         }
         let again = provider
@@ -815,7 +880,7 @@ async fn download_source(ctx: &Ctx, provider: &Provider, key: String) -> bool {
             .map(std::mem::take)
             .unwrap_or(false);
         if !again {
-            return replaced;
+            return (replaced, failure);
         }
     }
 }
@@ -837,7 +902,9 @@ async fn attempt(ctx: &Ctx, provider: &Provider, key: &str) -> Result<(), String
     } else {
         ctx.env.timing.source_timeout
     };
-    let bytes = crate::rule_download::fetch(
+    // Through the configured proxy, then directly (a proxy without a working
+    // node fails every download).
+    let bytes = crate::rule_download::fetch_or_direct(
         crate::rule_download::Fetch {
             url: &entry.url,
             socks5: &owner.spec.socks5,

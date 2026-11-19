@@ -77,7 +77,8 @@ pub(crate) fn body<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, Reply> 
 pub(crate) fn mutates(method: &str, path: &str) -> bool {
     path.strip_prefix(PREFIX).is_some_and(|rest| {
         let rest = rest.trim_end_matches('/');
-        let segments: Vec<&str> = rest.split('/').collect();
+        let decoded = path_segments(rest);
+        let segments: Vec<&str> = decoded.iter().map(String::as_str).collect();
         matches!(method, "POST" | "PUT" | "DELETE")
             && rest != "rules/test"
             && rest != "rules/dryrun"
@@ -205,7 +206,8 @@ fn builtin_label(name: &str) -> &str {
 }
 
 /// A builtin set: `refreshable`, its download address (`url`, a set with one
-/// source) and last update (`updated`, RFC 3339), whether the original
+/// source), last update (`updated`, RFC 3339) and auto-update settings
+/// (`auto_update`, `update_interval_hours`), whether the original
 /// judgement needs it (`required`: no deletion) and whether rules may name
 /// it (`usable`: not for the IP sets).
 fn builtin_view(config: &CompiledConfig, rules: &AtomRules, name: &str) -> serde_json::Value {
@@ -220,21 +222,32 @@ fn builtin_view(config: &CompiledConfig, rules: &AtomRules, name: &str) -> serde
         "required": crate::atom_rules::REQUIRED_BUILTIN.contains(&name),
         "usable": rules.builtin_names().iter().any(|n| n == name),
     });
-    if let Some((url, updated)) = provider
+    if let Some(source) = provider
         .as_ref()
-        .and_then(|provider| config.rule_sources.source_url(provider))
+        .and_then(|provider| config.rule_sources.source_settings(provider))
     {
-        value["url"] = url.into();
-        if let Some(updated) = updated {
+        value["url"] = source.url.into();
+        value["auto_update"] = source.auto_update.into();
+        value["update_interval_hours"] = source.update_interval_hours.into();
+        if let Some(updated) = source.updated {
             value["updated"] = updated.into();
         }
     }
     value
 }
 
-/// `PUT rulesets/{id}` of a builtin set: `{url}`, the download address of
-/// its one source; downloaded at once (like `refresh`).
-async fn set_builtin_url(
+/// Why no source of a builtin set downloaded, for the reply.
+fn download_failure(refreshed: &crate::rule_sources::Refreshed) -> String {
+    refreshed
+        .first_error
+        .clone()
+        .unwrap_or_else(|| "下载没有完成".to_owned())
+}
+
+/// `PUT rulesets/{id}` of a builtin set: `{url?, auto_update?,
+/// update_interval_hours?}` of its one source. A new address is downloaded
+/// at once (like `refresh`); 502 with the reason when that fails.
+async fn set_builtin(
     config: &CompiledConfig,
     rules: &AtomRules,
     id: &str,
@@ -243,18 +256,28 @@ async fn set_builtin_url(
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Put {
-        url: String,
+        url: Option<String>,
+        auto_update: Option<bool>,
+        update_interval_hours: Option<i64>,
     }
     let put: Put = body(bytes)?;
     let provider = config
         .rule_sources
         .provider(id)
         .filter(|provider| !matches!(provider.kind, crate::rule_sources::Kind::Light))
-        .ok_or_else(|| error(400, format!("内置规则集 `{id}` 没有可改的下载地址")))?;
-    match config.rule_sources.set_url(&provider, put.url.trim()).await {
-        Ok((sources, updated)) if sources > 0 && updated == 0 => Err(error(
+        .ok_or_else(|| error(400, format!("内置规则集 `{id}` 没有可改的下载来源")))?;
+    let edit = crate::rule_sources::SourceEdit {
+        url: put.url.as_deref().map(str::trim),
+        auto_update: put.auto_update,
+        update_interval_hours: put.update_interval_hours,
+    };
+    match config.rule_sources.set_source(&provider, edit).await {
+        Ok(Some(refreshed)) if refreshed.sources > 0 && refreshed.updated == 0 => Err(error(
             502,
-            format!("地址已保存，但没有下载成功（见日志），`{id}` 的列表保持不变"),
+            format!(
+                "地址已保存，但没有下载成功，`{id}` 的列表保持不变：{}",
+                download_failure(&refreshed)
+            ),
         )),
         Ok(_) => Ok(json(200, &builtin_view(config, rules, id))),
         Err((status, e)) => Err(error(status, e)),
@@ -398,7 +421,8 @@ pub(crate) async fn handle(
             "atom 规则表未启用（配置里没有 atom_rules 插件）",
         ));
     };
-    let segments: Vec<&str> = rest.split('/').collect();
+    let decoded = path_segments(rest);
+    let segments: Vec<&str> = decoded.iter().map(String::as_str).collect();
     if let Some(reply) =
         crate::atom_dns_api::handle(control, config, cache, method, &segments, request_body).await
     {
@@ -421,7 +445,7 @@ pub(crate) async fn handle(
         ("GET", ["rulesets", id]) => return Some(show_ruleset(config, rules, id)),
         ("POST", ["rulesets"]) => create_ruleset(rules, request_body, shutdown).await,
         ("PUT", ["rulesets", id]) if rules.listed_builtins().iter().any(|n| n == id) => {
-            set_builtin_url(config, rules, id, request_body).await
+            set_builtin(config, rules, id, request_body).await
         }
         ("PUT", ["rulesets", id]) => update_ruleset(rules, id, request_body),
         ("DELETE", ["rulesets", id]) => delete_any_ruleset(rules, id, query).await,
@@ -513,6 +537,17 @@ fn list_catalog(rules: &AtomRules, query: Option<&str>) -> Reply {
 
 /// A query value: `+` is a space, `%XX` a byte.
 fn percent_decode(text: &str) -> String {
+    decode(text, true)
+}
+
+/// A path's segments, each percent-decoded after the split (a decoded `/`
+/// stays inside its segment; `+` is itself): the UI encodes IDs such as
+/// `bm7:Claude` as `bm7%3AClaude`.
+pub(crate) fn path_segments(rest: &str) -> Vec<String> {
+    rest.split('/').map(|segment| decode(segment, false)).collect()
+}
+
+fn decode(text: &str, plus_is_space: bool) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -524,7 +559,7 @@ fn percent_decode(text: &str) -> String {
                 .and_then(|d| u8::try_from(d).ok())
         };
         match bytes[i] {
-            b'+' => out.push(b' '),
+            b'+' if plus_is_space => out.push(b' '),
             b'%' => {
                 if let (Some(high), Some(low)) = (hex(i + 1), hex(i + 2)) {
                     out.push(high * 16 + low);
@@ -1254,16 +1289,25 @@ async fn refresh_builtin(config: &CompiledConfig, id: &str) -> Result<Reply, Rep
         .rule_sources
         .provider(id)
         .filter(|provider| !matches!(provider.kind, crate::rule_sources::Kind::Light))
-        .ok_or_else(|| error(400, format!("内置规则集 `{id}` 不能刷新")))?;
+        .ok_or_else(|| error(400, format!("内置规则集 `{id}` 不能更新")))?;
     match config.rule_sources.refresh(&provider).await {
-        Ok((sources, updated)) if sources > 0 && updated == 0 => Err(error(
+        Ok(refreshed) if refreshed.sources > 0 && refreshed.updated == 0 => Err(error(
             502,
-            format!("内置规则集 `{id}` 的 {sources} 个来源都没有下载成功（见日志），列表保持不变"),
+            format!(
+                "内置规则集 `{id}` 的 {} 个来源都没有下载成功，列表保持不变：{}",
+                refreshed.sources,
+                download_failure(&refreshed)
+            ),
         )),
-        Ok((sources, updated)) => Ok(json(
-            200,
-            &serde_json::json!({ "id": id, "sources": sources, "updated": updated }),
-        )),
+        Ok(refreshed) => {
+            let mut value = serde_json::json!({
+                "id": id, "sources": refreshed.sources, "updated": refreshed.updated,
+            });
+            if let Some(failure) = refreshed.first_error {
+                value["error"] = failure.into();
+            }
+            Ok(json(200, &value))
+        }
         Err((status, e)) => Err(error(status, e)),
     }
 }
