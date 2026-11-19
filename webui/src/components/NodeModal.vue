@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ApiError, call, client, describe } from '../api/client'
 import AppModal from './AppModal.vue'
-import { FINAL, FINAL_NAME, final, groups, loadProxy, nodes, version, type Node } from '../composables/proxy'
+import { FINAL, FINAL_NAME, final, groups, loadProxy, nodeText, nodes, version, type Node } from '../composables/proxy'
 import { refreshStatus } from '../composables/status'
 import { toast } from '../composables/toast'
 
-/** Import nodes (no `node`), or rename / replace one. */
+/** Import nodes (no `node`), or edit one: its name and its whole content. */
 const props = defineProps<{ node?: Node }>()
 const emit = defineEmits<{ close: [] }>()
 
@@ -24,7 +24,6 @@ const placeholders: Record<Format, string> = {
 
 const form = reactive({
   name: props.node?.name ?? '',
-  replace: false,
   format: 'link' as Format,
   content: '',
   join: true,
@@ -38,21 +37,40 @@ const formVersion = ref(version.value)
 // After a 409 on an edit: the node as it is saved now (null when it was deleted).
 const conflict = ref<Node | null | undefined>(undefined)
 // The node the form edits from: the one opened, or the one saved now after "载入最新内容" or
-// "仍然保存" (what a change of name is compared with, and the connection shown).
+// "仍然保存" (what a change of name is compared with).
 const base = ref<Node | undefined>(props.node)
+// The node's content as loaded: saved back only when it was changed.
+const original = ref('')
+const loading = ref(false)
+
+async function loadContent(id: string) {
+  loading.value = true
+  try {
+    const text = await nodeText(id)
+    form.format = text.format
+    form.content = text.content
+    original.value = text.content
+  } catch (failure) {
+    error.value = describe(failure)
+  } finally {
+    loading.value = false
+  }
+}
+onMounted(() => {
+  if (props.node) void loadContent(props.node.id)
+})
 
 /** Drops the edits and starts again from the node as saved now. */
 function reload(current: Node) {
   base.value = current
   form.name = current.name
-  form.replace = false
-  form.content = ''
   formVersion.value = version.value
   conflict.value = undefined
   error.value = ''
+  void loadContent(current.id)
 }
 const joinTargets = computed(() => [...groups.value.map((group) => ({ id: group.id, name: group.name })), { id: FINAL, name: FINAL_NAME }])
-const outbound = computed(() => JSON.stringify(base.value?.outbound ?? {}, null, 2))
+const formatName = computed(() => formats.find((item) => item[0] === form.format)?.[1] ?? '')
 
 function stale(failure: unknown) {
   return failure instanceof ApiError && failure.status === 409 && failure.body?.version !== undefined
@@ -98,8 +116,8 @@ async function submit(overwrite = false) {
     if (props.node) {
       const body: { name?: string; format?: Format; content?: string; version: number } = { version: formVersion.value }
       if (form.name.trim() && form.name.trim() !== base.value?.name) body.name = form.name.trim()
-      if (form.replace) {
-        if (!content) throw new Error('请粘贴新的连接')
+      if (content !== original.value.trim()) {
+        if (!content) throw new Error('节点内容不能为空')
         body.format = form.format
         body.content = content
       }
@@ -150,17 +168,12 @@ async function submit(overwrite = false) {
         <label for="nname">名称</label>
         <input id="nname" v-model="form.name" class="inp" autocomplete="off" />
       </div>
-      <div class="tile">
-        <div class="k">当前连接</div>
-        <div class="v mono" style="font-size: 13px">{{ base?.type }} · {{ base?.server }}:{{ base?.server_port }}</div>
+      <div class="field">
+        <label for="ncontent">{{ formatName }}</label>
+        <textarea id="ncontent" v-model="form.content" class="inp mono" style="min-height: 260px" spellcheck="false" :disabled="loading"></textarea>
       </div>
-      <details>
-        <summary class="t2">连接参数</summary>
-        <pre class="json" style="margin-top: 8px">{{ outbound }}</pre>
-      </details>
-      <label class="row"><input v-model="form.replace" type="checkbox" /> 替换连接</label>
     </template>
-    <template v-if="!node || form.replace">
+    <template v-else>
       <div class="seg" style="align-self: flex-start">
         <button v-for="item in formats" :key="item[0]" type="button" :class="{ on: form.format === item[0] }" @click="form.format = item[0]">{{ item[1] }}</button>
       </div>
@@ -187,7 +200,7 @@ async function submit(overwrite = false) {
       </template>
       <template v-else>
         <button class="btn" type="button" @click="emit('close')">取消</button>
-        <button class="btn pri" type="button" :disabled="busy" @click="submit()">{{ node ? '保存' : '导入' }}</button>
+        <button class="btn pri" type="button" :disabled="busy || loading" @click="submit()">{{ node ? '保存' : '导入' }}</button>
       </template>
     </template>
   </AppModal>

@@ -634,7 +634,7 @@ paths:
       operationId: listNodes
       responses:
         "200":
-          description: The nodes (credentials left out).
+          description: The nodes, credentials included.
           content:
             application/json:
               schema:
@@ -839,6 +839,47 @@ paths:
           $ref: "#/components/responses/Conflict"
         "502":
           $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /nodes/{id}/export:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [nodes]
+      summary: One node as text, to edit or copy
+      description: |
+        A sing-box outbound (JSON, `tag` is the name) or a Clash/mihomo proxy (YAML, `name`), as
+        `PUT /nodes/{id}` takes back in `format` and `content`. Without `format`, the active kernel's:
+        `yaml` for mihomo, `json` for sing-box.
+      operationId: exportNode
+      parameters:
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [json, yaml]
+      responses:
+        "200":
+          description: The node's text.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [format, content]
+                properties:
+                  format:
+                    type: string
+                    enum: [json, yaml]
+                  content:
+                    type: string
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          description: The node has no mihomo form (`yaml`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         default:
           $ref: "#/components/responses/Error"
   /nodes/{id}/delay:
@@ -3937,7 +3978,7 @@ components:
         outbound:
           type: object
           description: |
-            The sing-box outbound without any credential. A `wireguard` node is the options of a
+            The whole sing-box outbound, credentials included (without `tag`). A `wireguard` node is the options of a
             sing-box endpoint (`address`, `private_key`, `peers`).
         active:
           type: boolean

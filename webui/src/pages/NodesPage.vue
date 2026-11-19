@@ -6,9 +6,10 @@ import NodeModal from '../components/NodeModal.vue'
 import ProviderModal from '../components/ProviderModal.vue'
 import { limited, testNode, testPoolNode, testing } from '../composables/delay'
 import { usePoll } from '../composables/poll'
-import { FINAL, final, groups, loadPool, loadProviders, loadProxy, loadRuntime, nameOf, nodes, poolNodes, providers, providerUpdated, reportFailure, runtime, version, type Node, type Provider } from '../composables/proxy'
+import { FINAL, final, groups, loadPool, loadProviders, loadProxy, loadRuntime, nameOf, nodeText, nodes, poolNodes, providers, providerUpdated, reportFailure, runtime, version, type Node, type Provider } from '../composables/proxy'
 import { isMihomo, refreshStatus } from '../composables/status'
 import { toast } from '../composables/toast'
+import { copyText } from '../clipboard'
 import { emptiedBy } from '../emptied'
 import { ago, latency, type Latency } from '../format'
 
@@ -94,12 +95,12 @@ async function testAll() {
   testingAll.value = false
 }
 
-async function copy(text: string) {
+async function copy(node: Node) {
   try {
-    await navigator.clipboard.writeText(text)
+    await copyText((await nodeText(node.id)).content)
     toast('ok', '已复制')
-  } catch {
-    toast('bad', '复制失败')
+  } catch (failure) {
+    toast('bad', failure instanceof ApiError ? `复制失败：${describe(failure)}` : '复制失败')
   }
 }
 
@@ -357,7 +358,7 @@ function closeProvider() {
         <div v-else-if="item.addr" class="t2 mono">{{ item.addr }}</div>
         <div v-if="item.node" class="hint">所在组：{{ item.groups.map(nameOf).join('、') || '无' }}</div>
         <div v-if="!selecting" class="acts">
-          <button v-if="item.node" class="ico" type="button" aria-label="复制地址" title="复制地址" @click="copy(item.addr)">
+          <button v-if="item.node" class="ico" type="button" aria-label="复制" title="复制" @click="copy(item.node)">
             <svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M4 16V4h12" /></svg>
           </button>
           <button v-if="!item.inactive" class="ico" type="button" aria-label="测速" title="测速" @click="test(item)">

@@ -317,6 +317,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/nodes/{id}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["Id"];
+            };
+            cookie?: never;
+        };
+        /**
+         * One node as text, to edit or copy
+         * @description A sing-box outbound (JSON, `tag` is the name) or a Clash/mihomo proxy (YAML, `name`), as
+         *     `PUT /nodes/{id}` takes back in `format` and `content`. Without `format`, the active kernel's:
+         *     `yaml` for mihomo, `json` for sing-box.
+         */
+        get: operations["exportNode"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/nodes/{id}/delay": {
         parameters: {
             query?: never;
@@ -1921,7 +1945,7 @@ export interface components {
             server?: string;
             server_port?: number;
             /**
-             * @description The sing-box outbound without any credential. A `wireguard` node is the options of a
+             * @description The whole sing-box outbound, credentials included (without `tag`). A `wireguard` node is the options of a
              *     sing-box endpoint (`address`, `private_key`, `peers`).
              */
             outbound: Record<string, never>;
@@ -2811,7 +2835,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The nodes (credentials left out). */
+            /** @description The nodes, credentials included. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2997,6 +3021,45 @@ export interface operations {
             404: components["responses"]["Error"];
             409: components["responses"]["Conflict"];
             502: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    exportNode: {
+        parameters: {
+            query?: {
+                format?: "json" | "yaml";
+            };
+            header?: never;
+            path: {
+                id: components["parameters"]["Id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The node's text. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        format: "json" | "yaml";
+                        content: string;
+                    };
+                };
+            };
+            404: components["responses"]["Error"];
+            /** @description The node has no mihomo form (`yaml`). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
             default: components["responses"]["Error"];
         };
     };

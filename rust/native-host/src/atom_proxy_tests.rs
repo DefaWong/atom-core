@@ -281,52 +281,6 @@ fn the_file_round_trips_and_a_bad_one_stops_loading() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-#[test]
-fn credentials_never_leave_through_the_view() {
-    let outbound = json!({
-        "type": "wireguard", "private_key": "k", "peers": [{"server": "a", "pre_shared_key": "psk", "public_key": "pub"}],
-        "obfs": {"type": "salamander", "password": "o"}, "uuid": "u", "username": "n", "password": "p",
-        "tls": {"enabled": true, "reality": {"public_key": "pk", "short_id": "01"}}
-    });
-    let shown = Value::Object(public_outbound(outbound.as_object().unwrap()));
-    assert_eq!(
-        shown,
-        json!({
-            "type": "wireguard", "peers": [{"server": "a", "public_key": "pub"}],
-            "obfs": {"type": "salamander"},
-            "tls": {"enabled": true, "reality": {"public_key": "pk"}}
-        })
-    );
-}
-
-#[test]
-fn tls_keys_reality_ids_hysteria_obfs_and_auth_headers_are_hidden() {
-    let outbound = json!({
-        "type": "hysteria", "obfs": "secret-obfs", "auth_str": "a",
-        "tls": {"enabled": true, "client_certificate": ["CERT"], "client_key": ["KEY"], "client_key_path": "/k.pem",
-                "reality": {"enabled": true, "public_key": "pk", "short_id": "01"}},
-        "transport": {"type": "ws", "headers": {"Host": "h.example", "Authorization": "Basic x", "cookie": "c"}},
-        "extra_headers": {"Proxy-Authorization": "Basic y", "X-Other": "z"}
-    });
-    let shown = Value::Object(public_outbound(outbound.as_object().unwrap()));
-    assert_eq!(
-        shown,
-        json!({
-            "type": "hysteria",
-            "tls": {"enabled": true, "client_certificate": ["CERT"], "client_key_path": "/k.pem",
-                    "reality": {"enabled": true, "public_key": "pk"}},
-            "transport": {"type": "ws", "headers": {"Host": "h.example"}},
-            "extra_headers": {"X-Other": "z"}
-        })
-    );
-    // hysteria2's obfs is an object: only its password goes.
-    let hy2 = json!({"type": "hysteria2", "obfs": {"type": "salamander", "password": "p"}});
-    assert_eq!(
-        Value::Object(public_outbound(hy2.as_object().unwrap()))["obfs"],
-        json!({"type": "salamander"})
-    );
-}
-
 #[cfg(unix)]
 #[test]
 fn the_state_file_is_owner_only() {
@@ -351,46 +305,7 @@ fn the_state_file_is_owner_only() {
 }
 
 #[test]
-fn tor_options_are_left_out_of_the_view_whole() {
-    let tor = json!({
-        "type": "tor", "executable_path": "/usr/bin/tor", "data_directory": "tor",
-        "extra_args": ["--HTTPSProxyAuthenticator", "alice:secret"],
-        "torrc": {"HTTPSProxy": "10.0.0.1:3128", "HTTPSProxyAuthenticator": "alice:secret"}
-    });
-    let shown = Value::Object(public_outbound(tor.as_object().unwrap()));
-    assert_eq!(
-        shown,
-        json!({"type": "tor", "executable_path": "/usr/bin/tor", "data_directory": "tor"})
-    );
-    assert!(!shown.to_string().contains("secret"));
-}
-
-#[test]
-fn credential_names_are_matched_as_sing_box_decodes_them() {
-    let http = json!({
-        "type": "http", "server": "proxy.example", "server_port": 8080,
-        "Username": "alice", "PASSWORD": "secret",
-        "Headers": {"AUTHORIZATION": "Basic x", "Host": "h"},
-        "Extra_Headers": {"Proxy-Authorization": "Basic y"},
-        "TLS": {"enabled": true, "Client_Key": ["KEY"], "Reality": {"Short_ID": "01", "public_key": "pk"}},
-        // Unicode simple folding: long s and the Kelvin sign.
-        "pa\u{17f}sword": "s1", "\u{212a}ey": "k1"
-    });
-    let shown = Value::Object(public_outbound(http.as_object().unwrap()));
-    assert_eq!(
-        shown,
-        json!({
-            "type": "http", "server": "proxy.example", "server_port": 8080,
-            "Headers": {"Host": "h"}, "Extra_Headers": {},
-            "TLS": {"enabled": true, "Reality": {"public_key": "pk"}}
-        })
-    );
-    let tor = json!({"type": "tor", "TORRC": {"HTTPSProxyAuthenticator": "a:b"}, "EXTRA_ARGS": ["x"], "Obfs": "o"});
-    assert_eq!(
-        Value::Object(public_outbound(tor.as_object().unwrap())),
-        json!({"type": "tor"})
-    );
-    // The refused fields are matched the same way.
+fn refused_fields_are_matched_as_sing_box_decodes_them() {
     for key in ["Detour", "TAG", "DeTour"] {
         let mut outbound = json!({"type": "socks", "server": "s", "server_port": 1});
         outbound[key] = json!("x");
