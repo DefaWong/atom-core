@@ -132,21 +132,31 @@ function endNode(id: string | undefined): string | undefined {
   }
   return current
 }
-/** A node's last test; a subscription node's comes from the pool (`alive: false`: it failed). */
+type PoolNode = (typeof poolNodes.value)[number]
+/** A subscription node's test (`alive: false`: it failed). */
+const poolTest = (node: PoolNode) =>
+  node.alive === false ? { delay: null, time: 'failed' } : { delay: node.delay ?? null, time: null }
+/** Subscription nodes by ID, for the group cards (the pool can hold thousands). */
+const poolById = computed(() => new Map(poolNodes.value.map((node) => [node.id, node])))
+/** A node's last test; a subscription node's comes from the pool. */
 function delayOf(id: string | undefined) {
   if (!id) return undefined
   if (isPoolNode(id)) {
-    const node = poolNodes.value.find((item) => item.id === id)
-    return node ? { delay: node.alive === false ? null : (node.delay ?? null), time: node.alive === false ? 'failed' : null } : undefined
+    const node = poolById.value.get(id)
+    return node ? poolTest(node) : undefined
   }
   return runtime.value?.nodes[id]
 }
 
 const nodeStats = computed(() => {
   const stats = { ok: 0, warn: 0, bad: 0, idle: 0 }
-  for (const node of [...nodes.value, ...poolNodes.value]) {
-    const test = delayOf(node.id)
+  for (const node of nodes.value) {
+    const test = runtime.value?.nodes[node.id]
     stats[latency(test?.delay, test?.time)]++
+  }
+  for (const node of poolNodes.value) {
+    const test = poolTest(node)
+    stats[latency(test.delay, test.time)]++
   }
   return stats
 })
