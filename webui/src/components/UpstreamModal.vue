@@ -82,7 +82,7 @@ function submit() {
 </script>
 
 <template>
-  <AppModal :title="`${withName ? '新建上游组' : upstream ? '编辑上游' : '添加上游'}${group ? ` · ${group}` : ''}`" @close="emit('close')">
+  <AppModal :dismissible="false" :title="`${withName ? '新建上游组' : upstream ? '编辑上游' : '添加上游'}${group ? ` · ${group}` : ''}`" @close="emit('close')">
     <div v-if="withName" class="field">
       <label for="ugname">组名</label>
       <input id="ugname" v-model="form.name" class="inp" autocomplete="off" />

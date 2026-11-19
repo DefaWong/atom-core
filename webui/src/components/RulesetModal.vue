@@ -97,7 +97,7 @@ const titles = { new: '新建规则集', edit: '编辑规则集', url: '编辑�
 </script>
 
 <template>
-  <AppModal :title="`${titles[mode]}${target ? ` · ${target.name}` : ''}`" @close="emit('close')">
+  <AppModal :dismissible="false" :title="`${titles[mode]}${target ? ` · ${target.name}` : ''}`" @close="emit('close')">
     <div v-if="mode === 'new'" class="seg" style="align-self: flex-start">
       <button type="button" :class="{ on: form.type === 'remote' }" @click="form.type = 'remote'">远程订阅</button>
       <button type="button" :class="{ on: form.type === 'local' }" @click="form.type = 'local'">本地列表</button>

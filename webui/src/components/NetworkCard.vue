@@ -41,7 +41,6 @@ watch(() => networkJob.value?.done, (done, wasDone) => {
 
 function setTopology() {
   if (!form.value) return
-  form.value.accept_gateway = false
   if (form.value.topology === 'bypass') {
     form.value.lan = form.value.lan.slice(0, 1)
     form.value.wan = ''
@@ -58,7 +57,7 @@ async function saveNetwork() {
   networkBusy.value = true
   try {
     const next = await call(client.POST('/maintenance/network', { body: {
-      ...form.value, lan: [...form.value.lan], revision: view.value.revision,
+      ...form.value, lan: [...form.value.lan], accept_gateway: true, revision: view.value.revision,
     } }))
     acceptMaintenanceJob(next)
   } catch (failure) {
@@ -149,10 +148,6 @@ async function confirmNetwork() {
           <label for="atom-client-nets">客户端网段（每行一个）</label>
           <textarea id="atom-client-nets" v-model.trim="form.client_nets" class="inp" placeholder="例：192.168.2.0/24"></textarea>
         </div>
-        <label class="row">
-          <input v-model="form.accept_gateway" type="checkbox" required />
-          主路由会把需要代理的流量和 FakeIP 网段路由到 Atom
-        </label>
       </template>
       <template v-if="form.topology === 'bypass'">
         <label class="row"><input v-model="form.reply_via" type="checkbox" /> 回包经主路由</label>

@@ -144,7 +144,7 @@ async function submit(overwrite = false) {
 </script>
 
 <template>
-  <AppModal :title="node ? '编辑节点' : '添加节点'" @close="emit('close')">
+  <AppModal :dismissible="false" :title="node ? '编辑节点' : '添加节点'" @close="emit('close')">
     <template v-if="node">
       <div class="field">
         <label for="nname">名称</label>

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { nextTick, onMounted, onUnmounted, ref } from 'vue'
 
-defineProps<{ title: string }>()
+// `dismissible: false` keeps the dialog open on a click outside it (dialogs with input); Esc still closes.
+const props = withDefaults(defineProps<{ title: string; dismissible?: boolean }>(), { dismissible: true })
 const emit = defineEmits<{ close: [] }>()
 
 const dialog = ref<HTMLElement | null>(null)
@@ -51,7 +52,7 @@ onUnmounted(() => {
 
 <template>
   <Teleport to="body">
-    <div class="mask" @click.self="emit('close')">
+    <div class="mask" @click.self="props.dismissible && emit('close')">
       <div ref="dialog" class="modal" role="dialog" aria-modal="true" :aria-label="title" tabindex="-1">
         <h3><slot name="title">{{ title }}</slot></h3>
         <slot />
