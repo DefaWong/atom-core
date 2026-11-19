@@ -445,6 +445,8 @@ pub(crate) struct AtomRules {
     pub(crate) mapper: Option<String>,
     /// SOCKS5 proxy for ruleset downloads (`proxy: $main_proxy`).
     pub(crate) socks5: String,
+    /// `socks5` is `main_proxy`'s: a download it fails is tried directly.
+    pub(crate) direct_fallback: std::cell::Cell<bool>,
     builtin: Vec<(String, BuiltinSet)>,
     state: RefCell<State>,
     table: Live<Table>,
@@ -932,6 +934,7 @@ impl AtomRules {
             marks,
             mapper,
             socks5,
+            direct_fallback: std::cell::Cell::new(false),
             builtin,
             state: RefCell::new(State {
                 version,

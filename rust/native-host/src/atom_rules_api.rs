@@ -77,7 +77,10 @@ pub(crate) fn body<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, Reply> 
 pub(crate) fn mutates(method: &str, path: &str) -> bool {
     path.strip_prefix(PREFIX).is_some_and(|rest| {
         let rest = rest.trim_end_matches('/');
-        let decoded = path_segments(rest);
+        // A path that does not decode is refused (400) without the lease.
+        let Some(decoded) = path_segments(rest) else {
+            return false;
+        };
         let segments: Vec<&str> = decoded.iter().map(String::as_str).collect();
         matches!(method, "POST" | "PUT" | "DELETE")
             && segments != ["rules", "test"]
@@ -424,7 +427,9 @@ pub(crate) async fn handle(
             "atom 规则表未启用（配置里没有 atom_rules 插件）",
         ));
     };
-    let decoded = path_segments(rest);
+    let Some(decoded) = path_segments(rest) else {
+        return Some(error(400, "路径编码无效"));
+    };
     let segments: Vec<&str> = decoded.iter().map(String::as_str).collect();
     if let Some(reply) =
         crate::atom_dns_api::handle(control, config, cache, method, &segments, request_body).await
@@ -541,13 +546,10 @@ fn list_catalog(rules: &AtomRules, query: Option<&str>) -> Reply {
 /// A path's segments, each percent-decoded after the split (a decoded `/`
 /// stays inside its segment; `+` is itself): the UI encodes IDs such as
 /// `bm7:Claude` as `bm7%3AClaude`.
-/// A segment that does not decode (a broken escape, not UTF-8) stays as
-/// written, so it names nothing.
-pub(crate) fn path_segments(rest: &str) -> Vec<String> {
+/// `None` when a segment does not decode (a broken escape, not UTF-8).
+pub(crate) fn path_segments(rest: &str) -> Option<Vec<String>> {
     rest.split('/')
-        .map(|segment| {
-            crate::api::decode_plugin_tag(segment).map_or_else(|| segment.to_owned(), |text| text.into_owned())
-        })
+        .map(|segment| crate::api::decode_plugin_tag(segment).map(std::borrow::Cow::into_owned))
         .collect()
 }
 
@@ -582,7 +584,7 @@ fn percent_decode(text: &str) -> String {
 
 /// `POST catalog/sync`: reads the index from GitHub now.
 async fn sync_catalog(rules: &AtomRules) -> Reply {
-    match crate::atom_catalog::sync(rules.root(), &rules.socks5, crate::atom_rules::now()).await {
+    match crate::atom_catalog::sync(rules.root(), &rules.socks5, rules.direct_fallback.get(), crate::atom_rules::now()).await {
         Ok(catalog) => {
             let view =
                 serde_json::json!({ "updated_at": catalog.updated_at, "size": catalog.len() });
@@ -683,7 +685,7 @@ async fn update_round(
         let Ok(lease) = control.begin_management_mutation() else {
             return;
         };
-        match crate::atom_catalog::sync(rules.root(), &rules.socks5, now).await {
+        match crate::atom_catalog::sync(rules.root(), &rules.socks5, rules.direct_fallback.get(), now).await {
             Ok(catalog) => rules.set_catalog(catalog),
             Err(e) => crate::diag::warn_line!("atom_rules: daily catalog sync failed: {e}"),
         }
@@ -1133,6 +1135,7 @@ async fn fetch_converted(
             max_bytes: DOWNLOAD_LIMIT,
             roots: None,
         },
+        rules.direct_fallback.get(),
         shutdown,
     )
     .await;

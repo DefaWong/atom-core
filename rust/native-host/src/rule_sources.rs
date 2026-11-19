@@ -640,7 +640,7 @@ impl RuleSources {
             if let Some(hours) = edit.update_interval_hours {
                 entry.update_interval_hours = hours;
             }
-            if entry.auto_update && entry.update_interval_hours == 0 {
+            if entry.auto_update && entry.update_interval_hours <= 0 {
                 return Err((400, "开启自动更新要先设好更新周期".to_owned()));
             }
             if repointed || before != (entry.auto_update, entry.update_interval_hours) {
@@ -905,8 +905,8 @@ async fn attempt(ctx: &Ctx, provider: &Provider, key: &str) -> Result<(), String
     } else {
         ctx.env.timing.source_timeout
     };
-    // Through the configured proxy, then directly (a proxy without a working
-    // node fails every download).
+    // Through the configured proxy, then (`main_proxy` only) directly: a
+    // proxy without a working node fails every download.
     let bytes = crate::rule_download::fetch_or_direct(
         crate::rule_download::Fetch {
             url: &entry.url,
@@ -915,6 +915,7 @@ async fn attempt(ctx: &Ctx, provider: &Provider, key: &str) -> Result<(), String
             max_bytes: ctx.env.timing.max_download_bytes,
             roots: ctx.env.roots.clone(),
         },
+        owner.spec.direct_fallback,
         &ctx.cancel,
     )
     .await?;
@@ -1777,6 +1778,7 @@ mod tests {
             dir: root.to_path_buf(),
             root_dir: root.to_path_buf(),
             socks5: String::new(),
+            direct_fallback: false,
         }
     }
 

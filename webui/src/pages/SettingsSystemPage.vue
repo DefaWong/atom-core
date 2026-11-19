@@ -27,10 +27,12 @@ async function loadStates() {
 }
 usePoll(loadStates, 10000)
 
+// The proxy kernel's row only once the current kernel is known.
+const kernel = computed<Service | null>(() => (status.value?.backend ? (isMihomo.value ? 'atom-mihomo' : 'atom-sing-box') : null))
 const rows = computed<{ service: Service; name: string; version: string }[]>(() => [
   { service: 'atom-maintenance', name: 'Atom 维护服务', version: maintenance.value?.version ?? '' },
   { service: 'atom-dns', name: 'AtomDNS', version: status.value?.atomdns.version ?? '' },
-  { service: isMihomo.value ? 'atom-mihomo' : 'atom-sing-box', name: backendName.value, version: backendVersion.value }
+  ...(kernel.value ? [{ service: kernel.value, name: backendName.value, version: backendVersion.value }] : [])
 ])
 const stateText: Record<State, [string, string]> = {
   running: ['ok', '运行中'],
@@ -52,8 +54,12 @@ const restartText = computed(() => {
 async function restart() {
   const target = restarting.value
   if (!target) return
-  restartBusy.value = true
   restartError.value = ''
+  if ((target.service === 'atom-sing-box' || target.service === 'atom-mihomo') && target.service !== kernel.value) {
+    restartError.value = `当前内核已不是 ${target.name}`
+    return
+  }
+  restartBusy.value = true
   try {
     await call(client.POST('/maintenance/restart', { body: { service: target.service } }))
     restarting.value = null

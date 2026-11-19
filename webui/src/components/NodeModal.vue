@@ -130,10 +130,15 @@ async function submit(overwrite = false) {
     if (props.node) {
       const body: { name?: string; format?: Format; content?: string; version: number } = { version: formVersion.value }
       if (form.name.trim() && form.name.trim() !== base.value?.name) body.name = form.name.trim()
-      if (content !== original.value.trim()) {
+      // Sent as written: a YAML block scalar keeps its trailing newline.
+      if (form.content !== original.value) {
         if (!content) throw new Error('节点内容不能为空')
         body.format = form.format
-        body.content = content
+        body.content = form.content
+      }
+      if (body.name === undefined && body.content === undefined) {
+        emit('close')
+        return
       }
       await call(client.PUT('/nodes/{id}', { params: { path: { id: props.node.id } }, body }))
       toast('ok', '已保存')

@@ -81,15 +81,17 @@ pub(crate) async fn fetch(
     }
 }
 
-/// [`fetch`] through `fetch.socks5`, then once more directly when the proxy
+/// [`fetch`] through `fetch.socks5`, then (with `fallback`: the proxy is
+/// `main_proxy`) once more directly when the proxy
 /// itself failed (it may have no working node); a failure past the proxy
 /// (TLS, a bad status, a body over the limit) is not retried, and a direct
 /// fetch is tried once. Both failures are in the error.
 pub(crate) async fn fetch_or_direct(
     fetch_args: Fetch<'_>,
+    fallback: bool,
     cancel: &TransportCancellation,
 ) -> Result<Vec<u8>, String> {
-    if fetch_args.socks5.is_empty() {
+    if fetch_args.socks5.is_empty() || !fallback {
         return fetch(fetch_args, cancel).await;
     }
     let proxy_failure = format!("proxy {}: ", fetch_args.socks5);

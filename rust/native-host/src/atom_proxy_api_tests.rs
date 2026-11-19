@@ -730,6 +730,12 @@ fn an_exported_node_saves_back_unchanged() {
     assert_eq!(status, 400, "{refused}");
     assert!(refused["error"].as_str().unwrap().contains("udp"), "{refused}");
     assert_eq!(api.outbound(&hk), before);
+    // Read as an outbound mihomo has no form for: refused, nothing saved.
+    let body = serde_json::json!({"format": "yaml", "content": format!("{yaml}disable-sni: true\n")});
+    let (status, refused) = api.call("PUT", &format!("/api/v1/atom/nodes/{hk}"), &body.to_string());
+    assert_eq!(status, 400, "{refused}");
+    assert!(refused["error"].as_str().unwrap().contains("mihomo"), "{refused}");
+    assert_eq!(api.outbound(&hk), before);
 
     // Hysteria2 bandwidth and a VLESS packet encoding come back from YAML; a
     // node the YAML cannot carry whole is offered only as JSON.

@@ -466,22 +466,21 @@ fn builtin_sets_are_removed_and_confirmed_deletions_edit_the_rules() {
 
 #[test]
 fn path_segments_are_decoded_after_the_split() {
-    assert_eq!(
-        path_segments("rulesets/bm7%3AClaude/refresh"),
-        ["rulesets", "bm7:Claude", "refresh"]
-    );
+    let segments = |path: &str| path_segments(path).unwrap();
+    assert_eq!(segments("rulesets/bm7%3AClaude/refresh"), ["rulesets", "bm7:Claude", "refresh"]);
     // A decoded `/` stays inside its segment; `+` is itself in a path.
-    assert_eq!(path_segments("rulesets/a%2Fb+c"), ["rulesets", "a/b+c"]);
-    assert_eq!(path_segments("upstreams/%E5%9B%BD%E5%86%85"), ["upstreams", "国内"]);
-    // Not UTF-8, or a broken escape: as written; U+FFFD itself decodes.
-    assert_eq!(path_segments("upstreams/%FF"), ["upstreams", "%FF"]);
-    assert_eq!(path_segments("upstreams/a%2"), ["upstreams", "a%2"]);
-    assert_eq!(path_segments("upstreams/%EF%BF%BD"), ["upstreams", "\u{fffd}"]);
+    assert_eq!(segments("rulesets/a%2Fb+c"), ["rulesets", "a/b+c"]);
+    assert_eq!(segments("upstreams/%E5%9B%BD%E5%86%85"), ["upstreams", "国内"]);
+    assert_eq!(segments("upstreams/%EF%BF%BD"), ["upstreams", "\u{fffd}"]);
+    // Not UTF-8, or a broken escape: refused.
+    assert_eq!(path_segments("upstreams/%FF"), None);
+    assert_eq!(path_segments("upstreams/a%2"), None);
     // The lease decision reads the same decoded segments as the dispatch: an
     // encoded `settings` still takes no outer lease.
     assert!(!mutates("PUT", "/api/v1/atom/%73ettings"));
     assert!(!mutates("POST", "/api/v1/atom/rules/%74est"));
     assert!(mutates("PUT", "/api/v1/atom/rulesets/bm7%3AClaude"));
+    assert!(!mutates("PUT", "/api/v1/atom/rulesets/corp%FF"));
 }
 
 /// A plain HTTP server for downloads: `/list.txt` is a domain list, anything
@@ -523,14 +522,28 @@ fn builtin_sources_are_edited_and_downloads_fall_back_to_direct() {
         ),
     )
     .unwrap();
-    let yaml = YAML
-        .replace(
+    let with_proxy = |proxy: &str| {
+        YAML.replace(
             "  - tag: domestic\n",
             // Port 1 refuses: the proxy is down.
-            "  - tag: cn_sites\n    type: sd_set_light\n    args: {socks5: '127.0.0.1:1', local_config: 'srs/cn.json'}\n  - tag: unified\n    type: domain_mapper\n    args: {rules: [{tag: cn_sites, mark: 9, output_tag: cn}]}\n  - tag: domestic\n",
+            &format!("  - tag: main_proxy\n    type: socks5_proxy\n    args: {{addr: '127.0.0.1:1'}}\n  - tag: cn_sites\n    type: sd_set_light\n    args: {{{proxy}, local_config: 'srs/cn.json'}}\n  - tag: unified\n    type: domain_mapper\n    args: {{rules: [{{tag: cn_sites, mark: 9, output_tag: cn}}]}}\n  - tag: domestic\n"),
         )
-        .replace("      builtin: [blocked]\n", "      mapper: unified\n      builtin: [blocked, cn_sites]\n");
-    let config = crate::config::compile_yaml_with_base(&yaml, &root).expect("config");
+        .replace("      builtin: [blocked]\n", "      mapper: unified\n      builtin: [blocked, cn_sites]\n")
+    };
+    // A proxy of its own is not `main_proxy`: its failure is the answer.
+    {
+        let own = scratch("builtin-source-own-proxy");
+        std::fs::create_dir_all(own.join("srs")).unwrap();
+        std::fs::copy(root.join("srs/cn.json"), own.join("srs/cn.json")).unwrap();
+        let config = crate::config::compile_yaml_with_base(&with_proxy("socks5: '127.0.0.1:1'"), &own).expect("config");
+        let assembly = HostAssembly::with_options(config, HostOptions::default()).unwrap();
+        let api = Api { assembly, root: own };
+        let (status, failed) = api.call("POST", "/api/v1/atom/rulesets/cn_sites/refresh", "");
+        assert_eq!(status, 502, "{failed}");
+        assert!(!failed["error"].as_str().unwrap().contains("直连"), "{failed}");
+        assert!(!api.root.join("srs/cn.txt").exists());
+    }
+    let config = crate::config::compile_yaml_with_base(&with_proxy("proxy: $main_proxy"), &root).expect("config");
     let assembly = HostAssembly::with_options(config, HostOptions::default()).unwrap();
     let api = Api { assembly, root };
 
@@ -571,4 +584,5 @@ fn builtin_sources_are_edited_and_downloads_fall_back_to_direct() {
     assert_eq!(status, 502, "{failed}");
     assert!(failed["error"].as_str().unwrap().contains("cn: "), "{failed}");
     assert_eq!(view()["url"], format!("http://127.0.0.1:{port}/missing.txt"), "the address is kept");
+    assert_eq!(api.call("GET", "/api/v1/atom/rulesets/cn_sites%FF", "").0, 400);
 }

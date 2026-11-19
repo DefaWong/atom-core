@@ -566,6 +566,8 @@ pub(crate) struct ManifestSpec {
     pub(crate) root_dir: PathBuf,
     /// `socks5` proxy address for downloads; empty means direct.
     pub(crate) socks5: String,
+    /// `socks5` is `main_proxy`'s: a download it fails is tried directly.
+    pub(crate) direct_fallback: bool,
 }
 
 impl ManifestSpec {
@@ -681,9 +683,9 @@ pub(super) fn manifest_spec(
         Schema::Adguard => "adguard_rule",
     };
     let allowed: &[&str] = if schema == Schema::Adguard {
-        &["dir", "socks5"]
+        &["dir", "socks5", "socks5_fallback"]
     } else {
-        &["socks5", "local_config"]
+        &["socks5", "socks5_fallback", "local_config"]
     };
     let (path, args) = args_map(plugin, allowed)?;
     let socks5 = match args.get("socks5") {
@@ -720,6 +722,7 @@ pub(super) fn manifest_spec(
         dir,
         root_dir: plugin.root_dir.clone(),
         socks5,
+        direct_fallback: matches!(args.get("socks5_fallback"), Some(RawValue::Bool(true))),
     })
 }
 

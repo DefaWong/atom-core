@@ -174,15 +174,6 @@ function limitsPatch(): { limits: Record<string, { max_entries?: number; ttl_sec
   }
   return { limits: out, error }
 }
-/** "No IPv4" is learned only by the periodic re-query: it must outlive the interval while that runs. */
-function noV4Error(): string {
-  const interval = requery.value?.enabled ? requery.value.interval_minutes : 0
-  const row = learning.value?.categories.find((item) => item.key === 'no_v4')
-  if (!interval || !row) return ''
-  const ttl = limitsPatch().limits.no_v4?.ttl_seconds ?? row.ttl_seconds
-  return ttl > interval * 60 ? '' : `「记忆无 V4」只在定期刷新时学到，有效期必须长于刷新间隔（${interval} 分钟）`
-}
-
 // Only what changed is sent (the last write wins: `dns` carries no version).
 function patchOf(part: Part): Schemas['DnsPatch'] {
   const current = dns.value
@@ -209,7 +200,7 @@ const changed = (part: Part) => Object.keys(patchOf(part)).length > 0
 async function saveDns(part: Part) {
   errors[part] = ''
   if (part === 'learning') {
-    const invalid = limitsPatch().error || noV4Error()
+    const invalid = limitsPatch().error
     if (invalid) {
       errors.learning = invalid
       return

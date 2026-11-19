@@ -431,7 +431,9 @@ fn unkept_yaml(text: &str, node: &crate::atom_proxy::Node) -> Result<(), Reply> 
         Ok(value) => Some(value),
         Err(_) => None,
     };
-    let (Some(Value::Object(mut written)), Ok(saved)) = (written, crate::atom_mihomo::convert_proxy(node)) else {
+    let saved = crate::atom_mihomo::convert_proxy(node)
+        .map_err(|reason| error(400, format!("保存后无法转换为 mihomo 节点：{reason}")))?;
+    let Some(Value::Object(mut written)) = written else {
         return Ok(());
     };
     written.remove("name");
