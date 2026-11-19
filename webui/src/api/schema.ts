@@ -836,6 +836,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/maintenance/services": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The state of Atom's services
+         * @description The maintenance worker itself, AtomDNS and the proxy kernels installed (`atom-sing-box`,
+         *     `atom-mihomo`).
+         */
+        get: operations["getAtomServices"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/maintenance/restart": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restart one of Atom's services
+         * @description The worker answers first, then restarts the service. Restarting `atom-dns` stops the panel
+         *     and DNS for a few seconds; an unknown service is refused (400).
+         */
+        post: operations["restartAtomService"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/maintenance/confirm": {
         parameters: {
             query?: never;
@@ -4182,6 +4224,65 @@ export interface operations {
         };
         responses: {
             202: components["responses"]["MaintenanceAccepted"];
+            default: components["responses"]["Error"];
+        };
+    };
+    getAtomServices: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The services. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        services: {
+                            /** @enum {string} */
+                            name: "atom-maintenance" | "atom-dns" | "atom-sing-box" | "atom-mihomo";
+                            /** @enum {string} */
+                            state: "running" | "stopped" | "failed" | "unknown";
+                        }[];
+                    };
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    restartAtomService: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    service: "atom-maintenance" | "atom-dns" | "atom-sing-box" | "atom-mihomo";
+                };
+            };
+        };
+        responses: {
+            /** @description The restart will follow. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        ok: boolean;
+                    };
+                };
+            };
+            400: components["responses"]["Error"];
             default: components["responses"]["Error"];
         };
     };

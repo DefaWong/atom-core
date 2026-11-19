@@ -1948,6 +1948,72 @@ paths:
           $ref: "#/components/responses/MaintenanceAccepted"
         default:
           $ref: "#/components/responses/Error"
+  /maintenance/services:
+    get:
+      tags: [maintenance]
+      summary: The state of Atom's services
+      description: |
+        The maintenance worker itself, AtomDNS and the proxy kernels installed (`atom-sing-box`,
+        `atom-mihomo`).
+      operationId: getAtomServices
+      responses:
+        "200":
+          description: The services.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [services]
+                properties:
+                  services:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, state]
+                      properties:
+                        name:
+                          type: string
+                          enum: [atom-maintenance, atom-dns, atom-sing-box, atom-mihomo]
+                        state:
+                          type: string
+                          enum: [running, stopped, failed, unknown]
+        default:
+          $ref: "#/components/responses/Error"
+  /maintenance/restart:
+    post:
+      tags: [maintenance]
+      summary: Restart one of Atom's services
+      description: |
+        The worker answers first, then restarts the service. Restarting `atom-dns` stops the panel
+        and DNS for a few seconds; an unknown service is refused (400).
+      operationId: restartAtomService
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [service]
+              additionalProperties: false
+              properties:
+                service:
+                  type: string
+                  enum: [atom-maintenance, atom-dns, atom-sing-box, atom-mihomo]
+      responses:
+        "202":
+          description: The restart will follow.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    type: boolean
+        "400":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
   /maintenance/confirm:
     post:
       tags: [maintenance]
