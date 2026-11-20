@@ -11,7 +11,7 @@ const emit = defineEmits<{ toggle: []; edit: []; remove: [] }>()
 const current = computed(() => currentOf(props.view.id))
 const tag = computed(() => (props.view.id === FINAL ? '兜底' : props.view.builtin ? '默认' : ''))
 const typeLabel = computed(() => groupTypeLabels[props.view.type])
-// The group's members as the kernel runs them: the saved ones, then the subscription nodes it reports.
+// Append the subscription nodes reported by the kernel to the active members.
 const members = computed(() => {
   const extra = (runtime.value?.groups[props.view.id]?.members ?? []).filter((id) => isPoolNode(id) && !props.view.members.includes(id))
   return [...props.view.members, ...extra]

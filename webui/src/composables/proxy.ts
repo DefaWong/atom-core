@@ -1,5 +1,6 @@
 import { computed, ref } from 'vue'
 import { ApiError, call, client, describe, type Schemas } from '../api/client'
+import { availableMembers } from '../group-members'
 import { toast } from './toast'
 
 export type Node = Schemas['Node']
@@ -39,6 +40,8 @@ export const FINAL_NAME = '兜底分组'
 
 /** The proxy state (nodes, groups, Final share one `version`) and sing-box's runtime view. */
 export const nodes = ref<Node[]>([])
+export const inactiveNodeIds = computed(() => new Set(nodes.value.filter((node) => node.active === false).map((node) => node.id)))
+export const isAvailableMember = (id: string) => !inactiveNodeIds.value.has(id)
 export const groups = ref<Group[]>([])
 export const order = ref<string[]>([])
 export const final = ref<Schemas['Final'] | null>(null)
@@ -151,18 +154,16 @@ export async function reportFailure(error: unknown) {
   }
 }
 
-/** Everything a group holds, in order: its own members and the nodes its filter matched, as the saved `order` arranges them. */
-export function membersOf(group: { members: string[]; matched?: string[]; order?: string[] }): string[] {
-  const base = [...group.members, ...(group.matched ?? []).filter((id) => !group.members.includes(id))]
-  const ordered = (group.order ?? []).filter((id, at, all) => base.includes(id) && all.indexOf(id) === at)
-  return [...ordered, ...base.filter((id) => !ordered.includes(id))]
+/** The saved and filtered members that can run on the selected kernel. */
+export function membersOf(group: Parameters<typeof availableMembers>[0]): string[] {
+  return availableMembers(group, inactiveNodeIds.value)
 }
 
 export const groupViews = computed<GroupView[]>(() => {
   const byId = new Map(groups.value.map((group) => [group.id, group]))
   return order.value.flatMap((id): GroupView[] => {
     if (id === FINAL) {
-      return final.value ? [{ id, name: FINAL_NAME, type: 'selector', members: final.value.members, builtin: true }] : []
+      return final.value ? [{ id, name: FINAL_NAME, type: 'selector', members: membersOf(final.value), builtin: true }] : []
     }
     const group = byId.get(id)
     return group ? [{ id, name: group.name, type: group.type, members: membersOf(group), builtin: group.builtin, group }] : []
@@ -188,13 +189,18 @@ export const nameOf = (id: string | undefined) => (id ? (names.value.get(id) ?? 
 export const isPoolNode = (id: string) => /^p-[0-9a-f]{8}\//.test(id)
 export const isGroup = (id: string) => id === FINAL || id.startsWith('g-')
 
-/** The member a group uses now (sing-box's view, else its saved choice, else the first). */
+/** The member a group uses now (kernel state first, then an available saved choice). */
 export function currentOf(id: string): string | undefined {
-  const now = runtime.value?.groups[id]?.now
+  const available = (member: string | undefined) => member && isAvailableMember(member) ? member : undefined
+  const now = available(runtime.value?.groups[id]?.now)
   if (now) return now
-  if (id === FINAL) return final.value?.selected || final.value?.members[0]
+  if (id === FINAL) {
+    const members = final.value ? membersOf(final.value) : []
+    const selected = final.value?.selected
+    return available(selected) ?? (selected && members.includes('g-default') ? 'g-default' : members[0])
+  }
   const group = groups.value.find((item) => item.id === id)
-  return group?.now || group?.selected || (group ? membersOf(group)[0] : undefined)
+  return available(group?.now) ?? available(group?.selected) ?? (group ? membersOf(group)[0] : undefined)
 }
 
 /** The node a member's traffic ends at (following groups that choose groups). */

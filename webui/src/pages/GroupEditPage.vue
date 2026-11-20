@@ -3,9 +3,10 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import draggable from 'vuedraggable'
 import { ApiError, call, client, describe } from '../api/client'
-import { FINAL, FINAL_NAME, groups, groupTypeLabels, isGroup, isPoolNode, loadProviders, loadProxy, membersOf, nameOf, nodes, final, poolNodes, providers, version, type Group } from '../composables/proxy'
+import { FINAL, FINAL_NAME, groups, groupTypeLabels, inactiveNodeIds, isAvailableMember, isGroup, isPoolNode, loadProviders, loadProxy, membersOf, nameOf, nodes, final, poolNodes, providers, version, type Group } from '../composables/proxy'
 import { isMihomo, refreshStatus } from '../composables/status'
 import { toast } from '../composables/toast'
+import { orderedMembers, reorderVisibleMembers } from '../group-members'
 
 // sing-box has no fallback or load-balance groups.
 const kinds = computed<Group['type'][]>(() => (isMihomo.value || form.type === 'fallback' || form.type === 'load-balance' ? ['selector', 'urltest', 'fallback', 'load-balance'] : ['selector', 'urltest']))
@@ -125,18 +126,18 @@ const locked = computed(() => {
   const saved = groups.value.find((item) => item.id === id.value)
   return new Set(filterText.value && saved?.filter === filterText.value ? (saved.matched ?? []) : [])
 })
-// Everything the group will hold: the ticked members, then the filtered nodes not among them.
-// The selected members as the right list shows them, in the order the group will have: the
-// stored `order` first, then what it does not name (the ticked members, then the filtered nodes).
+// Keep slots for inactive filter matches even when only the server can read the expression.
+const draftOrder = computed(() => orderedMembers({
+  members: form.members,
+  matched: [...new Set([...locked.value, ...form.order.filter((id) => inactiveNodeIds.value.has(id))])],
+  order: form.order
+}))
 const shown = computed({
-  get() {
-    const base = [...form.members, ...[...locked.value].filter((member) => !form.members.includes(member))]
-    const ordered = form.order.filter((member, at) => base.includes(member) && form.order.indexOf(member) === at)
-    return [...ordered, ...base.filter((member) => !ordered.includes(member))]
-  },
+  get: () => draftOrder.value.filter(isAvailableMember),
   set(list: string[]) {
-    form.order = list
-    form.members = list.filter((member) => form.members.includes(member))
+    const order = reorderVisibleMembers(draftOrder.value, list, inactiveNodeIds.value)
+    form.members = order.filter((member) => form.members.includes(member))
+    form.order = order
   }
 })
 // Subscription nodes the group takes: of every subscription, or of the ticked ones, narrowed by the name filter.
@@ -185,7 +186,7 @@ const candidates = computed(() => {
   const nodeItems =
     filter.value === 'group' || filter.value === 'provider'
       ? []
-      : nodes.value.map((node) => ({ id: node.id, name: node.name, group: false, provider: false, sub: node.active === false ? (node.inactive_reason ?? '不生效') : `${node.type ?? ''} · ${node.server ?? ''}:${node.server_port ?? ''}`, inactive: node.active === false }))
+      : nodes.value.filter((node) => isAvailableMember(node.id)).map((node) => ({ id: node.id, name: node.name, group: false, provider: false, sub: `${node.type ?? ''} · ${node.server ?? ''}:${node.server_port ?? ''}` }))
   return [...providerItems, ...groupItems, ...nodeItems]
 })
 
@@ -246,7 +247,9 @@ async function save(overwrite = false) {
   }
   // A selector keeps its choice while it is still a member ("" is the first member).
   // (a subscription node stays chosen while its subscription is a source)
-  const selected = isPicked(form.selected) || (isPoolNode(form.selected) && sourceProviders.value.some((id) => form.selected.startsWith(`${id}/`))) ? form.selected : ''
+  const savedGroup = groups.value.find((group) => group.id === id.value)
+  const hiddenFilteredSelection = inactiveNodeIds.value.has(form.selected) && savedGroup?.selected === form.selected && (savedGroup.filter ?? '') === filterText.value
+  const selected = isPicked(form.selected) || hiddenFilteredSelection || (isPoolNode(form.selected) && sourceProviders.value.some((id) => form.selected.startsWith(`${id}/`))) ? form.selected : ''
   if (!isFinal.value && filterRegex.value === false) {
     error.value = '筛选正则无效'
     return
@@ -263,7 +266,7 @@ async function save(overwrite = false) {
         ...(form.all_providers ? { all_providers: true } : form.providers.length ? { providers: form.providers } : {}),
         ...(form.type === 'load-balance' ? { strategy: form.strategy } : {}),
         filter: filterText.value,
-        order: filterText.value ? shown.value : [],
+        order: filterText.value ? draftOrder.value : [],
         version: formVersion.value,
         ...(form.type === 'selector'
           ? { selected }
@@ -363,7 +366,7 @@ async function save(overwrite = false) {
           <label v-for="item in candidates" :key="item.id" class="check" :class="{ on: isPicked(item.id) }">
             <input type="checkbox" :aria-label="item.name" :checked="isPicked(item.id)" :disabled="locked.has(item.id) || (form.all_providers && item.provider && item.id !== 'all-providers')" @change="toggle(item.id)" />
             <div>
-              <div class="t1">{{ item.name }} <span v-if="item.group" class="tag">组</span> <span v-if="item.provider && item.id !== 'all-providers'" class="tag">订阅</span> <span v-if="locked.has(item.id)" class="tag">筛选</span> <span v-if="'inactive' in item && item.inactive" class="tag">不生效</span></div>
+              <div class="t1">{{ item.name }} <span v-if="item.group" class="tag">组</span> <span v-if="item.provider && item.id !== 'all-providers'" class="tag">订阅</span> <span v-if="locked.has(item.id)" class="tag">筛选</span></div>
               <div class="t2 t1">{{ item.sub }}</div>
             </div>
           </label>
@@ -414,11 +417,11 @@ async function save(overwrite = false) {
         <div class="err">已在别处修改（409）。现在保存的是：</div>
         <div class="tile" style="font-size: 12.5px">
           <div>{{ conflict.name }} · {{ groupTypeLabels[conflict.type] }}</div>
-          <div class="t2">成员：{{ conflict.members.map(nameOf).join('、') || '空组' }}</div>
+          <div class="t2">成员：{{ conflict.members.filter(isAvailableMember).map(nameOf).join('、') || '空组' }}</div>
           <div v-if="conflict.all_providers || conflict.providers?.length" class="t2">订阅：{{ conflict.all_providers ? '全部订阅' : conflict.providers?.map(nameOf).join('、') }}</div>
           <div v-if="conflict.strategy" class="t2">策略：{{ strategyLabel(conflict.strategy) }}</div>
           <div v-if="conflict.filter" class="t2 mono">名称筛选：{{ conflict.filter }}</div>
-          <div v-if="conflict.type === 'selector'" class="t2">选中：{{ conflict.selected ? nameOf(conflict.selected) : '第一个成员' }}</div>
+          <div v-if="conflict.type === 'selector'" class="t2">选中：{{ conflict.selected && isAvailableMember(conflict.selected) ? nameOf(conflict.selected) : '第一个成员' }}</div>
           <template v-else>
             <div class="t2 mono">测速 URL：{{ conflict.url || '—' }}</div>
             <div class="t2 mono">间隔：{{ conflict.interval || '—' }} · 容差：{{ conflict.tolerance ?? '—' }}</div>

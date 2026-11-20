@@ -6,7 +6,7 @@ import { toast } from '../composables/toast'
 import { ago, duration, triggers } from '../format'
 import SettingsTabs from '../components/SettingsTabs.vue'
 import SwitchBackendModal from '../components/SwitchBackendModal.vue'
-import { loadProxy } from '../composables/proxy'
+import { loadProxy, loadRuntime } from '../composables/proxy'
 
 const settings = ref<Schemas['Settings'] | null>(null)
 const form = reactive({ fakeip_range: '', resolver: '', mixed_port: '' })
@@ -75,7 +75,7 @@ async function switched() {
   // the settings are read again (the kernel changed); unsaved edits of the form stay
   const old = settings.value
   const draft = { ...form }
-  await Promise.all([load(), loadProxy().catch(() => {}), refreshStatus().catch(() => {})])
+  await Promise.all([load(), loadProxy().catch(() => {}), loadRuntime(), refreshStatus().catch(() => {})])
   if (old) {
     if (draft.fakeip_range !== old.fakeip_range) form.fakeip_range = draft.fakeip_range
     if (draft.resolver !== old.resolver) form.resolver = draft.resolver
