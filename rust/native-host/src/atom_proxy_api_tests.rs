@@ -1708,6 +1708,46 @@ fn backend_check_allows_ss_interface_and_keeps_native_mihomo_nodes() {
     assert!(check["inactive_nodes"][0]["reason"].as_str().unwrap().contains("TLS"));
 }
 
+#[test]
+fn a_shadowtls_pair_is_saved_edited_and_exported_as_one_node() {
+    use serde_json::json;
+    let mut api = Api::new("shadowtls-pair");
+    let pair = crate::atom_singbox::tests::shadowtls_pair();
+    let body = |content: Value| json!({"format":"json","content":content}).to_string();
+    let (status, missing) = api.call("POST", "/api/v1/atom/nodes", &body(pair[0].clone()));
+    assert_eq!(status, 400, "{missing}");
+    assert!(missing["error"].as_str().unwrap().contains("一起导入"));
+    let duplicated = json!([pair[0], pair[1], pair[1]]);
+    assert_eq!(api.call("POST", "/api/v1/atom/nodes", &body(duplicated)).0, 400);
+
+    let (status, added) = api.call("POST", "/api/v1/atom/nodes", &body(pair));
+    assert_eq!(status, 201, "{added}");
+    assert_eq!(added["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(added["nodes"][0]["server"], "127.0.0.1");
+    let id = added["nodes"][0]["id"].as_str().unwrap();
+    let shadowtls_tag = format!("{id}-shadowtls");
+    assert_eq!(api.outbound(id)["detour"], shadowtls_tag);
+    assert_eq!(api.outbound(&shadowtls_tag)["type"], "shadowtls");
+    assert_eq!(api.call("GET", "/api/v1/atom/settings/backend-check?target=mihomo", "").1["inactive_nodes"], json!([]));
+
+    api.restart();
+    for format in ["json", "yaml"] {
+        let (status, exported) = api.call("GET", &format!("/api/v1/atom/nodes/{id}/export?format={format}"), "");
+        assert_eq!(status, 200, "{exported}");
+        if format == "json" {
+            let entries: Value = serde_json::from_str(exported["content"].as_str().unwrap()).unwrap();
+            assert_eq!(entries[0]["detour"], entries[1]["tag"]);
+        }
+        let (status, edited) = api.call("PUT", &format!("/api/v1/atom/nodes/{id}"), &exported.to_string());
+        assert_eq!(status, 200, "{edited}");
+        assert_eq!(api.outbound(id)["detour"], shadowtls_tag);
+        assert_eq!(api.outbound(&shadowtls_tag)["tls"]["utls"]["fingerprint"], "chrome");
+    }
+    let (status, _) = api.call("DELETE", &format!("/api/v1/atom/nodes/{id}"), "");
+    assert_eq!(status, 200);
+    assert!(api.outbound(&shadowtls_tag).is_null());
+}
+
 /// `POST nodes/delete` deletes several nodes with one sing-box reload; when
 /// any ID is refused nothing changes and every refused ID is listed.
 #[test]

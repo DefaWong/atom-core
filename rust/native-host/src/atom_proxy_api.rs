@@ -92,7 +92,7 @@ fn node_view(
     inactive: &std::collections::BTreeMap<String, String>,
     node: &crate::atom_proxy::Node,
 ) -> Value {
-    let native = node.mihomo.as_ref().unwrap_or(&node.outbound);
+    let native = node.mihomo.as_ref().or(node.shadowtls.as_ref()).unwrap_or(&node.outbound);
     json!({
         "active": !inactive.contains_key(&node.id),
         "inactive_reason": inactive.get(&node.id),
@@ -338,17 +338,27 @@ pub(crate) fn export_node(state: &ProxyState, id: &str, query: Option<&str>) -> 
         // when it reads back as the same outbound.
         if node.mihomo.is_none() {
             proxy.remove("name");
-            let back = crate::atom_links::singbox_from_clash(&proxy).map(|(_, outbound)| outbound);
-            if back.as_ref() != Ok(&node.outbound) {
+            let back = crate::atom_links::singbox_from_clash(&proxy);
+            let preserved = back.is_ok_and(|back| {
+                if node.shadowtls.is_some() {
+                    // The reverse conversion restores the pair with the equivalent dial settings.
+                    back.shadowtls.is_some()
+                } else {
+                    back.outbound == node.outbound
+                }
+            });
+            if !preserved {
                 return Err(error(422, "这个节点的 Clash YAML 不能完整表示，请用 JSON 编辑"));
             }
         }
         text
     } else {
-        let mut outbound = node.singbox_outbound().map_err(|message| error(422, message))?;
-        outbound.insert("tag".into(), json!(node.name));
-        serde_json::to_string_pretty(&ordered(&outbound, &["tag", "type", "server", "server_port"]))
-            .map_err(|e| error(500, format!("JSON 生成失败: {e}")))?
+        let outbounds = node.singbox_outbounds(&node.name).map_err(|message| error(422, message))?;
+        let ordered: Vec<_> = outbounds.iter().map(|outbound| ordered(outbound, &["tag", "type", "server", "server_port", "detour"])).collect();
+        match ordered.as_slice() {
+            [outbound] => serde_json::to_string_pretty(outbound),
+            _ => serde_json::to_string_pretty(&ordered),
+        }.map_err(|e| error(500, format!("JSON 生成失败: {e}")))?
     };
     Ok(reply_json(200, &json!({ "format": format, "content": content })))
 }
@@ -366,7 +376,8 @@ fn parse_import(format: &str, content: Value) -> Result<Vec<crate::atom_proxy::N
             crate::atom_links::lenient_json(&text).and_then(crate::atom_links::from_singbox_json)
         }
         ("json", None) => crate::atom_links::from_singbox_json(content),
-        ("link", Some(text)) => crate::atom_links::from_links(&text),
+        ("link", Some(text)) => crate::atom_links::from_links(&text).map(|links| links.into_iter()
+            .map(|(name, outbound)| crate::atom_proxy::Node::new(name, outbound)).collect()),
         ("yaml" | "link", None) => Err("content 必须是字符串".to_owned()),
         (other, _) => Err(format!("不支持的 format `{other}`：json、yaml 或 link")),
     }
@@ -374,7 +385,7 @@ fn parse_import(format: &str, content: Value) -> Result<Vec<crate::atom_proxy::N
     if imported.is_empty() {
         return Err(error(400, "没有可导入的节点"));
     }
-    Ok(imported.into_iter().map(|(name, outbound)| crate::atom_proxy::Node::new(name, outbound)).collect())
+    Ok(imported)
 }
 
 async fn update_node(rules: &AtomRules, id: &str, bytes: &[u8]) -> Answer {

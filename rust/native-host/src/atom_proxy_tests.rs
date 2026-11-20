@@ -179,7 +179,7 @@ fn selection_rules() {
 
 #[test]
 fn outbounds_are_proxy_types_without_tag_or_detour() {
-    let check = |value: Value| check_outbound(value.as_object().unwrap()).map_err(|r| r.message);
+    let check = |value: Value| check_outbound(value.as_object().unwrap(), false).map_err(|r| r.message);
     assert!(check(json!({"type": "tor", "executable_path": "/usr/bin/tor"})).is_err());
     assert!(check(json!({"type": "socks", "TYPE": "tor", "server": "proxy.example"})).is_err());
     check(json!({"type": "vless", "server": "a", "server_port": 1})).unwrap();
@@ -309,7 +309,7 @@ fn refused_fields_are_matched_as_sing_box_decodes_them() {
     for key in ["Detour", "TAG", "DeTour"] {
         let mut outbound = json!({"type": "socks", "server": "s", "server_port": 1});
         outbound[key] = json!("x");
-        let refused = check_outbound(outbound.as_object().unwrap())
+        let refused = check_outbound(outbound.as_object().unwrap(), false)
             .unwrap_err()
             .message;
         assert!(refused.contains("不能带"), "{key}: {refused}");
@@ -376,6 +376,7 @@ fn naive_node() -> Node {
         id: "n-00000009".to_owned(),
         name: "N".to_owned(),
         mihomo: None,
+        shadowtls: None,
         outbound: serde_json::json!({"type":"naive","server":"n.example","server_port":443})
             .as_object()
             .unwrap()
@@ -524,6 +525,7 @@ fn subscriptions_behind_inactive_nodes_download_directly() {
         id: kept.0.clone(),
         name: kept.1,
         mihomo: None,
+        shadowtls: None,
         outbound: json!({"type":"trojan","server":"t","server_port":1,"password":"p","tls":{"enabled":true}})
             .as_object().unwrap().clone(),
     });

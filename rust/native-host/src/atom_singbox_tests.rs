@@ -345,6 +345,7 @@ fn sample_state() -> ProxyState {
         name: "香港".into(),
         outbound,
         mihomo: None,
+        shadowtls: None,
     });
     state.groups[0].members = vec!["n-00000001".into()];
     state.groups.push(Group {
@@ -740,6 +741,7 @@ fn mihomo_node(outbound: Value) -> Node {
         id: "n-1".to_owned(),
         name: "n".to_owned(),
         mihomo: None,
+        shadowtls: None,
         outbound: outbound.as_object().unwrap().clone(),
     }
 }
@@ -850,6 +852,7 @@ fn wireguard_is_an_endpoint_in_singbox_and_a_proxy_in_mihomo() {
         id: "n-00000001".into(),
         name: "wg".into(),
         mihomo: None,
+        shadowtls: None,
         outbound: wireguard_node().as_object().unwrap().clone(),
     });
     state.groups[0].members = vec!["n-00000001".into()];
@@ -975,6 +978,7 @@ fn mihomo_groups_take_all_providers_filter_and_skip_inactive_nodes() {
         id: "n-00000001".into(),
         name: "HK trojan".into(),
         mihomo: None,
+        shadowtls: None,
         outbound: json!({"type":"trojan", "server":"t.test", "server_port":443, "password":"p", "tls":{"enabled":true}})
             .as_object().unwrap().clone(),
     });
@@ -982,6 +986,7 @@ fn mihomo_groups_take_all_providers_filter_and_skip_inactive_nodes() {
         id: "n-00000002".into(),
         name: "HK naive".into(),
         mihomo: None,
+        shadowtls: None,
         outbound: json!({"type":"naive", "server":"n.test", "server_port":443, "username":"u", "password":"p"})
             .as_object().unwrap().clone(),
     });
@@ -989,18 +994,21 @@ fn mihomo_groups_take_all_providers_filter_and_skip_inactive_nodes() {
         id: "n-00000003".into(),
         name: "wg".into(),
         mihomo: None,
+        shadowtls: None,
         outbound: wireguard_node().as_object().unwrap().clone(),
     });
     state.nodes.push(Node {
         id: "n-00000004".into(),
         name: "snell".into(),
         mihomo: None,
+        shadowtls: None,
         outbound: json!({"type":"snell", "server":"s.test", "server_port":443, "psk":"k", "version":4}).as_object().unwrap().clone(),
     });
     state.nodes.push(Node {
         id: "n-00000005".into(),
         name: "hy1".into(),
         mihomo: None,
+        shadowtls: None,
         outbound: json!({"type":"hysteria", "server":"h.test", "server_port":443, "up_mbps":10, "down_mbps":10, "auth_str":"a",
             "tls":{"enabled":true, "server_name":"h.test"}}).as_object().unwrap().clone(),
     });
@@ -1008,6 +1016,7 @@ fn mihomo_groups_take_all_providers_filter_and_skip_inactive_nodes() {
         id: "n-00000006".into(),
         name: "ssh".into(),
         mihomo: None,
+        shadowtls: None,
         outbound: json!({"type":"ssh", "server":"s.test", "server_port":22, "user":"root", "password":"p"}).as_object().unwrap().clone(),
     });
     state.groups[0].members = state.nodes.iter().map(|node| node.id.clone()).collect();
@@ -1065,7 +1074,7 @@ proxies:
                early-data-header-name: Sec-WebSocket-Protocol}}
 "#).unwrap());
     for node in &nodes {
-        assert!(node.mihomo.is_none(), "{}: {:?}", node.name, node.singbox_outbound());
+        assert!(node.mihomo.is_none(), "{}: {:?}", node.name, node.singbox_outbounds(&node.id));
     }
     assert_eq!(nodes[0].outbound["bind_interface"], "lo");
     assert_eq!(nodes[0].outbound["tcp_multi_path"], true);
@@ -1108,6 +1117,70 @@ proxies:
     }
 }
 
+pub(crate) fn shadowtls_pair() -> Value {
+    json!([
+        {"type":"shadowsocks","tag":"SS + ShadowTLS","method":"2022-blake3-aes-128-gcm",
+            "password":"AAECAwQFBgcICQoLDA0ODw==","detour":"shadowtls-out","udp_over_tcp":false,
+            "multiplex":{"enabled":true,"protocol":"h2mux","max_connections":8,"min_streams":16,
+                "padding":true,"brutal":{"enabled":false,"up_mbps":1000,"down_mbps":1000}}},
+        {"type":"shadowtls","tag":"shadowtls-out","server":"127.0.0.1","server_port":8884,
+            "version":3,"password":"fixture-only","tls":{"enabled":true,"server_name":"shadow.test",
+                "utls":{"enabled":true,"fingerprint":"chrome"}}}
+    ])
+}
+
+#[test]
+fn shadowsocks_shadowtls_round_trips_and_passes_both_kernel_checks() {
+    let mut nodes = crate::atom_links::from_singbox_json(shadowtls_pair()).unwrap();
+    let mut node = nodes.pop().unwrap();
+    assert!(nodes.is_empty());
+    node.id = "n-00000001".into();
+    let converted = crate::atom_mihomo::convert_proxy(&node).unwrap();
+    assert_eq!(converted["server"], "127.0.0.1");
+    assert_eq!(converted["port"], 8884);
+    assert_eq!(converted["client-fingerprint"], "chrome");
+    assert_eq!(converted["plugin"], "shadow-tls");
+    assert_eq!(converted["plugin-opts"], json!({"version":3,"host":"shadow.test","password":"fixture-only"}));
+    assert_eq!(converted["smux"], json!({"enabled":true,"protocol":"h2mux","max-connections":8,"min-streams":16,"padding":true}));
+    let mut proxy = converted.as_object().unwrap().clone();
+    proxy.remove("name");
+    let imported = crate::atom_links::singbox_from_clash(&proxy).unwrap();
+    assert_eq!(imported.shadowtls, node.shadowtls);
+    assert_eq!(imported.outbound["udp_over_tcp"], false);
+    assert_eq!(imported.outbound["multiplex"]["protocol"], "h2mux");
+    assert_eq!(imported.outbound["multiplex"]["padding"], true);
+    let mut tcp_only = node.clone();
+    tcp_only.outbound.insert("network".into(), json!("tcp"));
+    let mut tcp_proxy = crate::atom_mihomo::convert_proxy(&tcp_only).unwrap().as_object().unwrap().clone();
+    tcp_proxy.remove("name");
+    assert_eq!(tcp_proxy["smux"]["only-tcp"], true);
+    assert_eq!(crate::atom_links::singbox_from_clash(&tcp_proxy).unwrap().outbound["network"], "tcp");
+    let mut native_udp = proxy;
+    native_udp.remove("smux");
+    assert!(crate::atom_links::singbox_from_clash(&native_udp).unwrap_err().contains("UDP"));
+
+    let mut state = ProxyState::default();
+    let mut native_only = node.clone();
+    native_only.shadowtls.as_mut().unwrap().get_mut("tls").unwrap()["min_version"] = json!("1.3");
+    state.nodes = vec![native_only];
+    assert!(state.inactive_nodes_for(Backend::SingBox).is_empty());
+    assert!(state.inactive_nodes_for(Backend::Mihomo)[&node.id].contains("min_version"));
+    for (backend, var) in [(Backend::SingBox, "ATOM_TEST_SINGBOX"), (Backend::Mihomo, "ATOM_TEST_MIHOMO")] {
+        let Some(binary) = std::env::var_os(var) else { continue; };
+        let fake = FakeSingbox::start(&format!("shadowtls-{}", backend.name()));
+        let mut host = fake.host.clone();
+        host.binary = binary.into();
+        host.backend = backend;
+        state.settings.backend = backend;
+        state.nodes = vec![node.clone()];
+        state.groups[0].members = vec![node.id.clone()];
+        state.validate(&[]).unwrap();
+        assert!(state.inactive_nodes().is_empty());
+        let bytes = generate(&host, &state, &[], "223.5.5.5", "secret").unwrap();
+        check(&host, &bytes).unwrap();
+    }
+}
+
 #[test]
 fn audited_node_mappings_preserve_defaults_and_transport_options() {
     let vmess = json!({"type":"vmess","server":"127.0.0.1","server_port":443,
@@ -1117,7 +1190,7 @@ fn audited_node_mappings_preserve_defaults_and_transport_options() {
         proxy.remove("name");
         proxy
     };
-    let back = |proxy: &Map<String, Value>| crate::atom_links::singbox_from_clash(proxy).unwrap().1;
+    let back = |proxy: &Map<String, Value>| crate::atom_links::singbox_from_clash(proxy).unwrap().outbound;
     let mut proxy = to_mihomo(vmess.clone());
     assert_eq!(proxy["alterId"], 0);
     assert_eq!(proxy["cipher"], "auto");
@@ -1236,7 +1309,7 @@ fn shared_http_tuic_and_tls_settings_stay_equivalent() {
             }
             _ => unreachable!(),
         }
-        let (_, back) = crate::atom_links::singbox_from_clash(&proxy).unwrap();
+        let back = crate::atom_links::singbox_from_clash(&proxy).unwrap().outbound;
         assert_eq!(&Value::Object(back.clone()), original);
         state.add_nodes(vec![Node::new(proxy["type"].as_str().unwrap().into(), back)]);
     }
@@ -1254,7 +1327,7 @@ fn shared_http_tuic_and_tls_settings_stay_equivalent() {
         "{name: legacy, type: tuic, server: tuic.test, port: 443, uuid: 9b1c2e4a-0000-4000-8000-000000000001, password: p, udp-over-stream: true}",
     ).unwrap();
     assert!(legacy[0].mihomo.is_some());
-    assert!(legacy[0].singbox_outbound().unwrap_err().contains("v1"));
+    assert!(legacy[0].singbox_outbounds("legacy").unwrap_err().contains("v1"));
 
     for (backend, var) in [(Backend::SingBox, "ATOM_TEST_SINGBOX"), (Backend::Mihomo, "ATOM_TEST_MIHOMO")] {
         let Some(binary) = std::env::var_os(var) else { continue; };
@@ -1293,6 +1366,7 @@ fn real_singbox_accepts_wireguard_endpoint_snell_ssh_and_hysteria() {
             id: format!("n-0000000{index}"),
             name: format!("node{index}"),
             mihomo: None,
+            shadowtls: None,
             outbound: outbound.as_object().unwrap().clone(),
         });
     }

@@ -264,7 +264,8 @@ export interface paths {
          *     hysteria2/hy2, tuic, anytls, socks), `yaml` (Clash/mihomo `proxies`, also
          *     snell, ssh, hysteria and wireguard) or
          *     `json` (sing-box outbounds; `content` may then be a JSON value; a `wireguard` item
-         *     is the options of an endpoint). A Mihomo proxy without a lossless sing-box form
+         *     is the options of an endpoint). Import a Shadowsocks outbound and its referenced
+         *     ShadowTLS outbound together to create one node. A Mihomo proxy without a lossless sing-box form
          *     keeps its original configuration. Malformed imports are rejected as a batch.
          *     The active kernel validates the generated configuration before applying it.
          */
@@ -336,7 +337,8 @@ export interface paths {
          * @description A sing-box outbound (JSON, `tag` is the name) or a Clash/mihomo proxy (YAML, `name`), as
          *     `PUT /nodes/{id}` takes back in `format` and `content`. Without `format`, the active kernel's:
          *     `yaml` for mihomo, `json` for sing-box. A node stored as native Mihomo YAML
-         *     defaults to YAML under either kernel.
+         *     defaults to YAML under either kernel. A Shadowsocks node with a ShadowTLS transport
+         *     exports both outbounds as a JSON array.
          */
         get: operations["exportNode"];
         put?: never;
@@ -2023,8 +2025,9 @@ export interface components {
             server?: string;
             server_port?: number;
             /**
-             * @description The whole sing-box outbound, credentials included (without `tag`). A `wireguard` node is the options of a
-             *     sing-box endpoint (`address`, `private_key`, `peers`). Empty for a node stored in Mihomo form.
+             * @description The primary sing-box outbound, credentials included (without `tag`). A `wireguard` node is the options of a
+             *     sing-box endpoint (`address`, `private_key`, `peers`). Use the export endpoint for the full configuration of
+             *     a Shadowsocks node with a ShadowTLS transport. Empty for a node stored in Mihomo form.
              */
             outbound: Record<string, never>;
             /**

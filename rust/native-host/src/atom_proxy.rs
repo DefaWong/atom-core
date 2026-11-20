@@ -101,6 +101,9 @@ pub(crate) struct Node {
     /// The sing-box outbound without its `tag` (the tag is `id`).
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub(crate) outbound: Map<String, Value>,
+    /// The ShadowTLS transport used by a Shadowsocks outbound, without a tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) shadowtls: Option<Map<String, Value>>,
     /// The original Mihomo proxy when it cannot be stored as a sing-box node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) mihomo: Option<Map<String, Value>>,
@@ -108,18 +111,45 @@ pub(crate) struct Node {
 
 impl Node {
     pub(crate) fn new(name: String, outbound: Map<String, Value>) -> Self {
-        Self { id: String::new(), name, outbound, mihomo: None }
+        Self { id: String::new(), name, outbound, shadowtls: None, mihomo: None }
     }
 
     pub(crate) fn kind(&self) -> Option<&Value> {
         self.mihomo.as_ref().unwrap_or(&self.outbound).get("type")
     }
 
-    pub(crate) fn singbox_outbound(&self) -> Result<Map<String, Value>, String> {
-        match &self.mihomo {
-            Some(proxy) => crate::atom_links::singbox_from_clash(proxy).map(|(_, outbound)| outbound),
-            None => Ok(self.outbound.clone()),
+    pub(crate) fn singbox_outbounds(&self, tag: &str) -> Result<Vec<Map<String, Value>>, String> {
+        let converted;
+        let node = match &self.mihomo {
+            Some(proxy) => {
+                converted = crate::atom_links::singbox_from_clash(proxy)?;
+                &converted
+            }
+            None => self,
+        };
+        let mut outbound = node.outbound.clone();
+        outbound.insert("tag".into(), Value::String(tag.into()));
+        if let Some(mut shadowtls) = node.shadowtls.clone() {
+            // Node IDs have a fixed length, so this cannot collide with other node or group tags.
+            let transport_tag = format!("{tag}-shadowtls");
+            outbound.insert("detour".into(), Value::String(transport_tag.clone()));
+            shadowtls.insert("tag".into(), Value::String(transport_tag));
+            Ok(vec![outbound, shadowtls])
+        } else {
+            Ok(vec![outbound])
         }
+    }
+
+    pub(crate) fn check_singbox(&self) -> Result<(), Refusal> {
+        if let Some(transport) = &self.shadowtls {
+            if self.outbound.get("type").and_then(Value::as_str) != Some("shadowsocks")
+                || transport.get("type").and_then(Value::as_str) != Some("shadowtls")
+            {
+                return Err(invalid("组合节点需要 Shadowsocks 和 ShadowTLS 出站"));
+            }
+            check_outbound(transport, false)?;
+        }
+        check_outbound(&self.outbound, self.shadowtls.is_some())
     }
 }
 
@@ -410,10 +440,8 @@ fn check_name(what: &str, name: &str) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// A node's outbound: a proxy type, no `tag` (atom sets it) and no
-/// `detour` (chains are not offered yet). The protocol fields are left to
-/// `sing-box check`.
-pub(crate) fn check_outbound(outbound: &Map<String, Value>) -> Result<(), Refusal> {
+/// Atom assigns tags and detours after validating the stored outbounds.
+fn check_outbound(outbound: &Map<String, Value>, has_transport: bool) -> Result<(), Refusal> {
     let kind = outbound
         .get("type")
         .and_then(Value::as_str)
@@ -433,7 +461,7 @@ pub(crate) fn check_outbound(outbound: &Map<String, Value>) -> Result<(), Refusa
         }
     }
     let uses_realm = kind == "hysteria2" && outbound.get("realm").is_some_and(Value::is_object);
-    if kind != "wireguard" && !uses_realm {
+    if kind != "wireguard" && !uses_realm && !has_transport {
         let server = outbound.get("server").and_then(Value::as_str).unwrap_or("");
         if server.trim().is_empty() {
             return Err(invalid(format!("{kind} 节点需要 server")));
@@ -731,9 +759,9 @@ impl ProxyState {
             }
             check_name("节点", &node.name)?;
             let result = match &node.mihomo {
-                Some(proxy) if node.outbound.is_empty() => crate::atom_links::check_mihomo_proxy(proxy).map_err(invalid),
+                Some(proxy) if node.outbound.is_empty() && node.shadowtls.is_none() => crate::atom_links::check_mihomo_proxy(proxy).map_err(invalid),
                 Some(_) => Err(invalid("节点只能保存一份原生配置")),
-                None => check_outbound(&node.outbound),
+                None => node.check_singbox(),
             };
             result
                 .map_err(|refusal| invalid(format!("节点 {}: {}", node.id, refusal.message)))?;
@@ -967,9 +995,9 @@ impl ProxyState {
         self.nodes
             .iter()
             .filter_map(|node| {
-                let result = match backend {
-                    Backend::Mihomo if node.mihomo.is_none() => crate::atom_mihomo::convert_proxy(node).map(|_| ()),
-                    Backend::SingBox if node.mihomo.is_some() => node.singbox_outbound().map(|_| ()),
+                let result = match (backend, &node.mihomo) {
+                    (Backend::Mihomo, None) => crate::atom_mihomo::convert_proxy(node).map(|_| ()),
+                    (Backend::SingBox, Some(proxy)) => crate::atom_links::singbox_from_clash(proxy).map(|_| ()),
                     _ => Ok(()),
                 };
                 result.err().map(|reason| (node.id.clone(), reason))
@@ -1105,6 +1133,7 @@ impl ProxyState {
         }
         if let Some(imported) = imported {
             node.outbound = imported.outbound;
+            node.shadowtls = imported.shadowtls;
             node.mihomo = imported.mihomo;
         }
         let node = node.clone();

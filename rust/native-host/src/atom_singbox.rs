@@ -145,12 +145,12 @@ pub(crate) fn generate(
     // group still refers to it by its tag.
     let mut endpoints = Vec::new();
     for node in &state.nodes {
-        let mut outbound = node.singbox_outbound().map_err(|error| format!("节点 {} ({})：{error}", node.name, node.id))?;
-        outbound.insert("tag".into(), json!(node.id));
-        if outbound.get("type").and_then(Value::as_str) == Some("wireguard") {
-            endpoints.push(Value::Object(outbound));
-        } else {
-            outbounds.push(Value::Object(outbound));
+        for outbound in node.singbox_outbounds(&node.id).map_err(|error| format!("节点 {} ({})：{error}", node.name, node.id))? {
+            if outbound.get("type").and_then(Value::as_str) == Some("wireguard") {
+                endpoints.push(Value::Object(outbound));
+            } else {
+                outbounds.push(Value::Object(outbound));
+            }
         }
     }
     for group in &state.groups {

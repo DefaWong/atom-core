@@ -1473,23 +1473,98 @@ pub(crate) fn import_clash_yaml(content: &str) -> Result<Vec<Node>, String> {
         numbered(index, check_mihomo_proxy(&proxy))?;
         let name = clean_name(&name, &proxy);
         match singbox_from_clash(&proxy) {
-            Ok((_, outbound)) => Ok(Node::new(name, outbound)),
+            Ok(node) => Ok(Node { name, ..node }),
             Err(_) => Ok(Node { mihomo: Some(proxy), ..Node::new(name, Map::new()) }),
         }
     }).collect()
 }
 
-pub(crate) fn singbox_from_clash(proxy: &Map<String, Value>) -> Result<Imported, String> {
+fn clash_shadowtls(proxy: &Map<String, Value>) -> Result<Node, String> {
+    let mut ss = proxy.clone();
+    ss.remove("plugin");
+    ss.remove("plugin-opts");
+    let mut smux = section(proxy, "smux");
+    if truthy(&smux, "enabled") {
+        if truthy(&smux, "only-tcp") {
+            if truthy(proxy, "udp") {
+                return Err("Mihomo 的 ShadowTLS 使用 TCP 多路复用及独立 UDP，sing-box 无法等价转换".into());
+            }
+            smux.remove("only-tcp");
+            ss.insert("smux".into(), Value::Object(smux));
+        } else {
+            // A Mihomo mux proxy advertises UDP even when the underlying proxy disables it.
+            ss.insert("udp".into(), json!(true));
+        }
+    }
+    let (name, mut outbound) = clash_proxy(&ss)?;
+    if truthy(proxy, "udp") && !truthy(proxy, "udp-over-tcp") && !outbound.contains_key("multiplex") {
+        return Err("Mihomo 的 SS ShadowTLS 裸 UDP 无法通过 sing-box 的 ShadowTLS 出站".into());
+    }
+    let opts = section(proxy, "plugin-opts");
+    let version = match text(&opts, "version").as_str() {
+        "" | "2" => 2,
+        "1" => 1,
+        "3" => 3,
+        _ => return Err("ShadowTLS 版本必须为 1、2 或 3".into()),
+    };
+    let host = text(&opts, "host");
+    if host.is_empty() {
+        return Err("ShadowTLS 插件缺少 host，无法保留 TLS 服务器名称".into());
+    }
+    let mut tls = json!({"enabled":true, "server_name":host});
+    let fingerprint = text(proxy, "client-fingerprint");
+    if !fingerprint.is_empty() {
+        tls["utls"] = json!({"enabled":true,"fingerprint":fingerprint});
+    }
+    if let Some(alpn) = opts.get("alpn") {
+        tls["alpn"] = alpn.clone();
+    } else if fingerprint.is_empty() {
+        tls["alpn"] = json!(["h2", "http/1.1"]);
+    }
+    if let Some(insecure) = opts.get("skip-cert-verify") {
+        tls["insecure"] = insecure.clone();
+    }
+    let mut shadowtls = Map::from_iter([
+        ("type".into(), json!("shadowtls")), ("version".into(), json!(version)), ("tls".into(), tls),
+    ]);
+    if let Some(password) = opts.get("password") {
+        shadowtls.insert("password".into(), password.clone());
+    }
+    for key in ["server", "server_port", "bind_interface", "routing_mark", "tcp_fast_open", "tcp_multi_path"] {
+        if let Some(value) = outbound.remove(key) {
+            shadowtls.insert(key.into(), value);
+        }
+    }
+    Ok(Node { shadowtls: Some(shadowtls), ..Node::new(name, outbound) })
+}
+
+pub(crate) fn singbox_from_clash(proxy: &Map<String, Value>) -> Result<Node, String> {
     let kind = text(proxy, "type");
     if matches!(kind.as_str(), "wireguard" | "anytls") && !truthy(proxy, "udp") {
         return Err(format!("Mihomo 的 {kind} 没有启用 UDP，sing-box 无法禁用此协议的 UDP"));
     }
-    let (name, outbound) = clash_proxy(proxy)?;
-    crate::atom_proxy::check_outbound(&outbound).map_err(|error| error.message)?;
-    let converted = crate::atom_mihomo::convert_outbound("", &outbound)
+    let node = if kind == "ss" && text(proxy, "plugin") == "shadow-tls" {
+        clash_shadowtls(proxy)?
+    } else {
+        let (name, outbound) = clash_proxy(proxy)?;
+        Node::new(name, outbound)
+    };
+    node.check_singbox().map_err(|error| error.message)?;
+    let converted = crate::atom_mihomo::convert_proxy(&node)
         .map_err(|error| format!("无法保留 Mihomo 配置：{error}"))?;
     let mut comparable = proxy.clone();
-    if kind == "hysteria2" && outbound.contains_key("realm") {
+    if node.shadowtls.is_some() {
+        let smux = section(proxy, "smux");
+        if truthy(&smux, "enabled") && !truthy(&smux, "only-tcp") {
+            comparable.remove("udp");
+            if let Some(Value::Object(options)) = comparable.get_mut("smux") {
+                if options.get("only-tcp") == Some(&json!(false)) {
+                    options.remove("only-tcp");
+                }
+            }
+        }
+    }
+    if kind == "hysteria2" && node.outbound.contains_key("realm") {
         comparable.remove("server");
         comparable.remove("port");
     }
@@ -1536,7 +1611,7 @@ pub(crate) fn singbox_from_clash(proxy: &Map<String, Value>) -> Result<Imported,
     if !lost.is_empty() {
         return Err(format!("转换到 sing-box 无法保留字段：{}", lost.join("、")));
     }
-    Ok((name, outbound))
+    Ok(node)
 }
 
 /// Also accept equivalent scalar spellings used by both YAML decoders.
@@ -1667,7 +1742,7 @@ fn strip_comments_and_trailing_commas(text: &str) -> String {
 
 /// Nodes from sing-box JSON: one outbound, a list, or a configuration with
 /// `outbounds` (only its proxy outbounds).
-pub(crate) fn from_singbox_json(value: Value) -> Result<Vec<Imported>, String> {
+pub(crate) fn from_singbox_json(value: Value) -> Result<Vec<Node>, String> {
     let (items, whole) = match value {
         Value::Object(mut map)
             if (map.contains_key("outbounds") || map.contains_key("endpoints"))
@@ -1693,13 +1768,20 @@ pub(crate) fn from_singbox_json(value: Value) -> Result<Vec<Imported>, String> {
         Value::Array(items) => (items, false),
         _ => return Err("JSON 里没有 outbound".into()),
     };
+    let mut tags = std::collections::BTreeMap::new();
+    for (index, item) in items.iter().enumerate() {
+        if let Some(tag) = item.get("tag").and_then(Value::as_str).filter(|tag| !tag.is_empty()) {
+            tags.entry(tag).and_modify(|entry| *entry = None).or_insert(Some(index));
+        }
+    }
+    let mut transports = std::collections::BTreeSet::new();
     let mut nodes = Vec::new();
-    for (index, item) in items.into_iter().enumerate() {
-        let mut outbound = obj(item);
+    for (index, item) in items.iter().enumerate() {
+        let mut outbound = item.as_object().cloned().unwrap_or_default();
         if outbound.is_empty() {
             return Err(format!("第 {} 项不是对象", index + 1));
         }
-        let kind = outbound.get("type").and_then(Value::as_str).unwrap_or("");
+        let kind = item.get("type").and_then(Value::as_str).unwrap_or("");
         if whole
             && matches!(
                 kind,
@@ -1708,17 +1790,34 @@ pub(crate) fn from_singbox_json(value: Value) -> Result<Vec<Imported>, String> {
         {
             continue;
         }
+        let shadowtls = if let Some(detour) = outbound.remove("detour") {
+            if kind != "shadowsocks" {
+                return numbered(index, Err("目前只支持 Shadowsocks 通过 detour 引用 ShadowTLS".into()));
+            }
+            let target = numbered(index, detour.as_str().filter(|tag| !tag.is_empty())
+                .ok_or_else(|| "detour 需要非空的 ShadowTLS 标签".to_owned()))?;
+            let target_index = match tags.get(target) {
+                Some(Some(target_index)) => *target_index,
+                Some(None) => return numbered(index, Err(format!("detour 引用的标签 `{target}` 重复"))),
+                None => return numbered(index, Err(format!("找不到 detour 引用的 ShadowTLS `{target}`，请一起导入两个出站"))),
+            };
+            let mut transport = items[target_index].as_object().cloned().unwrap_or_default();
+            transport.remove("tag");
+            transports.insert(target_index);
+            Some(transport)
+        } else {
+            None
+        };
         let name = match outbound.remove("tag") {
             Some(Value::String(tag)) => tag,
             _ => String::new(),
         };
-        let name = clean_name(&name, &outbound);
-        numbered(
-            index,
-            crate::atom_proxy::check_outbound(&outbound).map_err(|refusal| refusal.message),
-        )?;
-        nodes.push((name, outbound));
+        let name = clean_name(&name, shadowtls.as_ref().unwrap_or(&outbound));
+        let node = Node { shadowtls, ..Node::new(name, outbound) };
+        numbered(index, node.check_singbox().map_err(|refusal| refusal.message))?;
+        nodes.push((index, node));
     }
+    let nodes: Vec<_> = nodes.into_iter().filter_map(|(index, node)| (!transports.contains(&index)).then_some(node)).collect();
     if nodes.is_empty() {
         return Err("没有可导入的节点".into());
     }

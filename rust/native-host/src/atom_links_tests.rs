@@ -228,8 +228,8 @@ proxies:
 #[test]
 fn singbox_json_forms() {
     let single = from_singbox_json(json!({"type": "trojan", "tag": "我的节点", "server": "t", "server_port": 443, "password": "p"})).unwrap();
-    assert_eq!(single[0].0, "我的节点");
-    assert!(!single[0].1.contains_key("tag"));
+    assert_eq!(single[0].name, "我的节点");
+    assert!(!single[0].outbound.contains_key("tag"));
     let whole = from_singbox_json(json!({
         "outbounds": [
             {"type": "direct", "tag": "direct"},
@@ -239,7 +239,7 @@ fn singbox_json_forms() {
     }))
     .unwrap();
     assert_eq!(whole.len(), 1);
-    assert_eq!(whole[0].0, "a");
+    assert_eq!(whole[0].name, "a");
     assert!(
         from_singbox_json(json!([{"type": "direct"}]))
             .unwrap_err()
@@ -343,10 +343,10 @@ fn json_copied_out_of_a_configuration() {
     let value = lenient_json(text).unwrap();
     let nodes = from_singbox_json(value).unwrap();
     assert_eq!(nodes.len(), 2);
-    assert_eq!(nodes[0].0, "node-a");
-    assert_eq!(nodes[0].1["server"], "2001:db8::1");
-    assert_eq!(nodes[0].1["tls"]["server_name"], "a.example");
-    assert_eq!(nodes[1].0, "node-b");
+    assert_eq!(nodes[0].name, "node-a");
+    assert_eq!(nodes[0].outbound["server"], "2001:db8::1");
+    assert_eq!(nodes[0].outbound["tls"]["server_name"], "a.example");
+    assert_eq!(nodes[1].name, "node-b");
 }
 
 #[test]
@@ -414,7 +414,7 @@ proxies:
     assert_eq!(wg["peers"][0]["reserved"], json!([1, 2, 3]));
     assert_eq!(wg["peers"][0]["persistent_keepalive_interval"], 25);
     for node in &nodes {
-        crate::atom_proxy::check_outbound(&node.1).unwrap();
+        Node::new(node.0.clone(), node.1.clone()).check_singbox().unwrap();
     }
     assert!(from_clash_yaml("- {name: s, type: snell, server: s, port: 1, psk: k, version: 3}").is_err());
     assert!(from_clash_yaml("- {name: s, type: ssh, server: s, port: 22, username: r, private-key: /root/key}").is_err());
@@ -430,7 +430,7 @@ fn a_whole_singbox_config_brings_its_wireguard_endpoints() {
         ]
     }))
     .unwrap();
-    let names: Vec<&str> = nodes.iter().map(|node| node.0.as_str()).collect();
+    let names: Vec<&str> = nodes.iter().map(|node| node.name.as_str()).collect();
     assert_eq!(names, ["s", "wg"]);
 }
 
@@ -451,7 +451,7 @@ fn a_singbox_config_with_only_endpoints_imports() {
         "route": {"final": "wg"}
     }))
     .unwrap();
-    assert_eq!(nodes[0].0, "wg");
+    assert_eq!(nodes[0].name, "wg");
 }
 
 #[test]

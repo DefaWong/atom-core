@@ -310,7 +310,89 @@ pub(crate) fn convert_proxy(node: &Node) -> Result<Value, String> {
         proxy.insert("name".into(), json!(node.id));
         return Ok(Value::Object(proxy));
     }
+    if let Some(shadowtls) = &node.shadowtls {
+        return convert_shadowtls(&node.id, &node.outbound, shadowtls);
+    }
     convert_outbound(&node.id, &node.outbound)
+}
+
+fn convert_shadowtls(id: &str, outbound: &Map<String, Value>, shadowtls: &Map<String, Value>) -> Result<Value, String> {
+    let mut ss = outbound.clone();
+    if ["plugin", "plugin_opts", "bind_interface", "routing_mark", "tcp_fast_open", "tcp_multi_path"]
+        .iter().any(|key| ss.contains_key(*key))
+    {
+        return Err("组合节点的 Shadowsocks 出站不能带额外插件或拨号选项，请在 ShadowTLS 出站设置拨号选项".into());
+    }
+    let mut transport = shadowtls.clone();
+    transport.remove("type");
+    copy(&mut transport, &mut ss, &[("server", "server"), ("server_port", "server_port")]);
+    let mut out = object(convert_outbound(id, &ss)?, "Shadowsocks")?;
+    if out.get("udp-over-tcp") == Some(&json!(true)) {
+        // sing-box uses UDP-over-TCP in place of multiplex when both are set.
+        out.remove("smux");
+    } else if out.get("smux").is_some() && out["udp"] == false {
+        out["smux"]["only-tcp"] = json!(true);
+    } else if !out.contains_key("smux") {
+        // The ShadowTLS dialer has no native UDP transport.
+        out.insert("udp".into(), json!(false));
+    }
+
+    let version = match transport.remove("version") {
+        None => 1,
+        Some(value) => value.as_u64().filter(|v| *v <= 3).ok_or("ShadowTLS 版本必须为 1、2 或 3")?.max(1),
+    };
+    let mut tls = object(transport.remove("tls").unwrap_or_default(), "ShadowTLS tls")?;
+    if tls.remove("enabled") != Some(json!(true)) {
+        return Err("ShadowTLS 需要启用 TLS".into());
+    }
+    let host = tls.remove("server_name").filter(|name| name.as_str().is_some_and(|s| !s.is_empty()));
+    let mut opts = Map::from_iter([
+        ("version".into(), json!(version)),
+        ("host".into(), host.unwrap_or_else(|| out["server"].clone())),
+    ]);
+    if version != 1 {
+        copy(&mut transport, &mut opts, &[("password", "password")]);
+    } else {
+        transport.remove("password");
+    }
+    copy(&mut tls, &mut opts, &[("insecure", "skip-cert-verify")]);
+    let mut fingerprint = None;
+    if let Some(value) = tls.remove("utls").filter(|value| !value.is_null()) {
+        let mut utls = object(value, "ShadowTLS utls")?;
+        if utls.remove("enabled") == Some(json!(true)) {
+            if version != 3 {
+                return Err("ShadowTLS v1/v2 的 uTLS 行为在两个内核中不同".into());
+            }
+            let value = utls.remove("fingerprint").unwrap_or_default();
+            let name = match value.as_str().unwrap_or_default() {
+                "" | "chrome" | "chrome_psk" | "chrome_psk_shuffle" | "chrome_padding_psk_shuffle" | "chrome_pq" | "chrome_pq_psk" => "chrome",
+                name @ ("firefox" | "safari" | "ios" | "android" | "edge" | "360" | "qq" | "random" | "randomized") => name,
+                _ => return Err("ShadowTLS 的 uTLS 指纹无法在 Mihomo 中保留".into()),
+            };
+            fingerprint = Some(json!(name));
+        } else {
+            utls.remove("fingerprint");
+        }
+        no_extra(&utls)?;
+    }
+    if let Some(alpn) = tls.remove("alpn") {
+        let protocols = take_strings(alpn, "ShadowTLS tls.alpn")?;
+        if fingerprint.is_some() && !protocols.is_empty() && protocols != ["http/1.1"] {
+            return Err("Mihomo 的 ShadowTLS uTLS 不支持自定义 ALPN 列表".into());
+        }
+        opts.insert("alpn".into(), json!(protocols));
+    } else if fingerprint.is_none() {
+        opts.insert("alpn".into(), json!([]));
+    }
+    if let Some(fingerprint) = fingerprint {
+        out.insert("client-fingerprint".into(), fingerprint);
+    }
+    no_extra(&tls).map_err(|error| format!("ShadowTLS TLS：{error}"))?;
+    convert_dial_fields(&mut transport, &mut out, "shadowtls")?;
+    no_extra(&transport).map_err(|error| format!("ShadowTLS：{error}"))?;
+    out.insert("plugin".into(), json!("shadow-tls"));
+    out.insert("plugin-opts".into(), Value::Object(opts));
+    Ok(Value::Object(out))
 }
 
 pub(crate) fn convert_outbound(id: &str, outbound: &Map<String, Value>) -> Result<Value, String> {
