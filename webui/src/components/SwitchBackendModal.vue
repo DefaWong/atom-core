@@ -19,6 +19,7 @@ interface Brief {
 interface Check {
   provider_count: number
   inactive_nodes: Brief[]
+  statistics_warnings?: Brief[]
   blocked_providers: Brief[]
   groups_to_handle: Brief[]
   provider_only_groups: Brief[]
@@ -45,6 +46,7 @@ async function load() {
 onMounted(load)
 
 const inactive = computed(() => check.value?.inactive_nodes ?? [])
+const statistics = computed(() => check.value?.statistics_warnings ?? [])
 const blocked = computed(() => check.value?.blocked_providers ?? [])
 const handle = computed(() => check.value?.groups_to_handle ?? [])
 const providerOnly = computed(() => check.value?.provider_only_groups ?? [])
@@ -57,7 +59,8 @@ async function confirm() {
     const body = {
       backend: props.target,
       ...(props.target === 'sing-box' ? { group_actions: { ...actions } } : {}),
-      ...(inactive.value.length ? { confirm_inactive_nodes: true } : {})
+      ...(inactive.value.length ? { confirm_inactive_nodes: true } : {}),
+      ...(statistics.value.length ? { confirm_statistics_warnings: true } : {})
     }
     await call(client.PUT('/settings', { body }))
     toast('ok', `已切换到 ${props.target}`)
@@ -112,6 +115,13 @@ async function confirm() {
         <div v-for="node in inactive" :key="node.id" class="item">
           <span class="nm">{{ node.name }} <span class="tag">{{ (node.type ?? '').toUpperCase() }}</span></span>
           <span class="t2">{{ node.reason }}</span>
+        </div>
+      </div>
+      <div v-if="statistics.length" class="grid" style="gap: 8px">
+        <h4 class="sec">复用连接统计将暂停 <span class="tag">{{ statistics.length }}</span></h4>
+        <div class="warnbox">这些节点在 sing-box 下仍可转发，切回 Mihomo 后会恢复复用连接统计。</div>
+        <div v-for="node in statistics" :key="node.id" class="item">
+          <span class="nm">{{ node.name }}</span>
         </div>
       </div>
       <div v-if="blocked.length && target === 'mihomo'" class="grid" style="gap: 8px">

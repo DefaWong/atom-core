@@ -167,6 +167,22 @@ fn inactive_list(state: &ProxyState, inactive: &std::collections::BTreeMap<Strin
         .collect()
 }
 
+fn smux_statistics_warnings(
+    state: &ProxyState,
+    target: crate::atom_proxy::Backend,
+    inactive: &std::collections::BTreeMap<String, String>,
+) -> Vec<Value> {
+    if target != crate::atom_proxy::Backend::SingBox {
+        return Vec::new();
+    }
+    state.nodes.iter()
+        .filter(|node| !inactive.contains_key(&node.id) && node.mihomo.as_ref()
+            .is_some_and(crate::atom_links::clash_uses_smux_statistics))
+        .map(|node| json!({"id":node.id, "name":node.name, "type":node.kind(),
+            "reason":"smux.statistic 仅在 Mihomo 统计底层复用连接"}))
+        .collect()
+}
+
 fn query_value<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
     query?
         .split('&')
@@ -226,6 +242,7 @@ fn backend_check(rules: &AtomRules, query: Option<&str>) -> Answer {
             "current": state.settings.backend,
             "provider_count": state.providers.len(),
             "inactive_nodes": inactive_list(&state, &inactive),
+            "statistics_warnings": smux_statistics_warnings(&state, target, &inactive),
             "blocked_providers": blocked,
             "groups_to_handle": to_handle,
             "provider_only_groups": provider_only,
@@ -956,6 +973,7 @@ async fn put_settings(
         group_actions: Option<std::collections::BTreeMap<String, String>>,
         /// Nodes the target cannot run stay in the saved state but are inactive.
         confirm_inactive_nodes: Option<bool>,
+        confirm_statistics_warnings: Option<bool>,
         fakeip_range: Option<String>,
         resolver: Option<String>,
         mixed_port: Option<u16>,
@@ -1002,6 +1020,13 @@ async fn put_settings(
                     "nodes": inactive_list(&next, &inactive),
                 }),
             );
+        }
+        let statistics = smux_statistics_warnings(&next, next.settings.backend, &inactive);
+        if !statistics.is_empty() && request.confirm_statistics_warnings != Some(true) {
+            return reply_json(409, &json!({
+                "error": "切换后部分节点的复用连接统计会暂停，请确认后切换（confirm_statistics_warnings）",
+                "statistics_warnings": statistics,
+            }));
         }
         match next.settings.backend {
             crate::atom_proxy::Backend::SingBox => {

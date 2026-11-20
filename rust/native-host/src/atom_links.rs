@@ -791,10 +791,12 @@ fn clash_tls_options(proxy: &Map<String, Value>, enabled: bool) -> Option<Value>
         settings.insecure = true;
     }
     let mut tls = settings.value()?;
-    if let Some(pins) = proxy.get("fingerprint").and_then(Value::as_str)
-        .and_then(|fingerprint| fingerprint.strip_prefix(crate::atom_mihomo::PUBLIC_KEY_PIN_PREFIX))
-    {
-        tls["certificate_public_key_sha256"] = json!(pins.split(',').collect::<Vec<_>>());
+    if let Some(fingerprint) = proxy.get("fingerprint").and_then(Value::as_str).filter(|value| !value.is_empty()) {
+        if let Some(pins) = fingerprint.strip_prefix(crate::atom_mihomo::PUBLIC_KEY_PIN_PREFIX) {
+            tls["certificate_public_key_sha256"] = json!(pins.split(',').collect::<Vec<_>>());
+        } else {
+            tls["certificate_fingerprint"] = json!(fingerprint);
+        }
     }
     if tuic && proxy.contains_key("disable-sni") {
         tls["disable_sni"] = json!(settings.disable_sni);
@@ -1509,10 +1511,15 @@ pub(crate) fn import_clash_yaml(content: &str) -> Result<Vec<Node>, String> {
         numbered(index, check_mihomo_proxy(&proxy))?;
         let name = clean_name(&name, &proxy);
         match singbox_from_clash(&proxy) {
-            Ok(node) => Ok(Node { name, ..node }),
-            Err(_) => Ok(Node { mihomo: Some(proxy), ..Node::new(name, Map::new()) }),
+            Ok(node) if !clash_uses_smux_statistics(&proxy) => Ok(Node { name, ..node }),
+            _ => Ok(Node { mihomo: Some(proxy), ..Node::new(name, Map::new()) }),
         }
     }).collect()
+}
+
+pub(crate) fn clash_uses_smux_statistics(proxy: &Map<String, Value>) -> bool {
+    proxy.get("smux").and_then(Value::as_object)
+        .is_some_and(|smux| truthy(smux, "enabled") && truthy(smux, "statistic"))
 }
 
 fn clash_shadowtls(proxy: &Map<String, Value>) -> Result<Node, String> {
@@ -1638,7 +1645,12 @@ fn normalize_clash_defaults(proxy: &mut Map<String, Value>, kind: &str) {
         proxy.remove("smux");
     } else if let Some(Value::Object(smux)) = proxy.get_mut("smux") {
         let mux_udp = smux_carries_udp(smux);
-        for key in ["only-tcp", "statistic", "padding"] {
+        // This only controls Mihomo's local tracker on the mux carrier.
+        // The node keeps its native config and switching previews this difference.
+        if truthy(smux, "statistic") || smux.get("statistic").is_some_and(|value| value == false) {
+            smux.remove("statistic");
+        }
+        for key in ["only-tcp", "padding"] {
             if smux.get(key).is_some_and(|value| value == false) {
                 smux.remove(key);
             }

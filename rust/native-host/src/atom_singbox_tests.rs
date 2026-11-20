@@ -1323,6 +1323,14 @@ fn shared_http_tuic_and_tls_settings_stay_equivalent() {
         let back = crate::atom_links::singbox_from_clash(&proxy).unwrap().outbound;
         assert_eq!(&Value::Object(back.clone()), original);
         state.add_nodes(vec![Node::new(proxy["type"].as_str().unwrap().into(), back)]);
+        if proxy["type"] != "http" {
+            let full_fingerprint = "01:".repeat(31) + "01";
+            proxy.insert("fingerprint".into(), json!(full_fingerprint));
+            let imported = crate::atom_links::singbox_from_clash(&proxy).unwrap();
+            assert_eq!(imported.outbound["tls"]["certificate_fingerprint"], full_fingerprint);
+            assert!(imported.outbound["tls"].get("certificate_public_key_sha256").is_none());
+            state.add_nodes(vec![imported]);
+        }
     }
 
     let mut http = fixtures[0].clone();

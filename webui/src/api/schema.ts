@@ -612,6 +612,8 @@ export interface paths {
          *     one gives 409 with `groups`. Subscriptions are kept but do not run. When
          *     nodes cannot be converted, the request needs `confirm_inactive_nodes: true`, else 409 with
          *     `nodes`. Those nodes keep their original configuration and are inactive under the target kernel.
+         *     Nodes that only lose Mihomo's mux connection statistics stay active under sing-box.
+         *     Their original configuration is kept. To switch, confirm with `confirm_statistics_warnings: true`.
          */
         put: operations["putSettings"];
         post?: never;
@@ -3780,6 +3782,8 @@ export interface operations {
                     };
                     /** @description Accept that the nodes the target kernel cannot run stay inactive. */
                     confirm_inactive_nodes?: boolean;
+                    /** @description Accept that Mihomo mux connection statistics pause under sing-box. */
+                    confirm_statistics_warnings?: boolean;
                     fakeip_range?: string;
                     /** @description "" (follow the domestic upstreams), an IP, udp://IP[:port] or tcp://IP[:port]. */
                     resolver?: string;
@@ -3848,6 +3852,13 @@ export interface operations {
                         provider_count?: number;
                         /** @description Nodes the target kernel cannot run. */
                         inactive_nodes?: {
+                            id?: string;
+                            name?: string;
+                            type?: string;
+                            reason?: string;
+                        }[];
+                        /** @description Nodes that stay active while their Mihomo mux connection statistics pause. */
+                        statistics_warnings?: {
                             id?: string;
                             name?: string;
                             type?: string;

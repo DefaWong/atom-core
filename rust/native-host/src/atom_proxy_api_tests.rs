@@ -1774,6 +1774,32 @@ fn imports_pasted_inline_clash_nodes_with_misaligned_dashes() {
     assert_eq!(nodes[1]["outbound"]["tls"]["server_name"], "tls.test");
 }
 
+#[test]
+fn mihomo_statistics_warn_without_disabling_nodes_and_keep_native_yaml() {
+    use serde_json::json;
+    let api = Api::new("mihomo-statistics");
+    let fingerprint = "01:".repeat(31) + "01";
+    let content = json!({"name":"Stats", "type":"trojan", "server":"trojan.test", "port":443, "password":"test",
+        "fingerprint":fingerprint, "smux":{"enabled":true,"protocol":"h2mux","statistic":true}});
+    let body = json!({"format":"yaml", "content":content.to_string()});
+    let (status, added) = api.call("POST", "/api/v1/atom/nodes", &body.to_string());
+    assert_eq!(status, 201, "{added}");
+    assert_eq!(added["nodes"][0]["active"], true);
+    let id = added["nodes"][0]["id"].as_str().unwrap();
+    let outbound = api.outbound(id);
+    assert_eq!(outbound["tls"]["certificate_fingerprint"], fingerprint);
+    assert_eq!(outbound["multiplex"]["enabled"], true);
+    let (status, exported) = api.call("GET", &format!("/api/v1/atom/nodes/{id}/export?format=yaml"), "");
+    assert_eq!(status, 200, "{exported}");
+    assert!(exported["content"].as_str().unwrap().contains("statistic: true"));
+    let (_, to_sb) = api.call("GET", "/api/v1/atom/settings/backend-check?target=sing-box", "");
+    assert_eq!(to_sb["inactive_nodes"], json!([]));
+    assert_eq!(to_sb["statistics_warnings"][0]["id"], id);
+    let (_, to_mihomo) = api.call("GET", "/api/v1/atom/settings/backend-check?target=mihomo", "");
+    assert_eq!(to_mihomo["inactive_nodes"], json!([]));
+    assert_eq!(to_mihomo["statistics_warnings"], json!([]));
+}
+
 /// `POST nodes/delete` deletes several nodes with one sing-box reload; when
 /// any ID is refused nothing changes and every refused ID is listed.
 #[test]

@@ -89,7 +89,7 @@ fn clash_defaults_convert_without_dropping_enabled_mihomo_options() {
 
     proxy["smux"]["only-tcp"] = json!(false);
     proxy["smux"]["statistic"] = json!(true);
-    assert!(convert(&proxy).unwrap_err().contains("smux.statistic"));
+    assert!(convert(&proxy).is_ok());
     let saved = import_clash_yaml(&proxy.to_string()).unwrap();
     assert_eq!(saved[0].mihomo.as_ref().unwrap()["smux"], proxy["smux"]);
 }

@@ -10,7 +10,7 @@ use crate::atom_singbox::{Host, IpRule};
 pub(crate) const PUBLIC_KEY_PIN_PREFIX: &str = "spki-sha256:";
 pub(crate) const TUIC_HEARTBEAT_PREFIX: &str = "tuic:";
 
-fn supports_public_key_pin(ty: &str) -> bool {
+fn supports_certificate_pinning(ty: &str) -> bool {
     matches!(ty, "hysteria2" | "tuic" | "trojan" | "anytls")
 }
 
@@ -994,7 +994,7 @@ fn convert_tls(
     if let Some(value) = tls.remove("certificate_public_key_sha256").filter(|value| !value.is_null()) {
         let pins = take_strings(value, "certificate_public_key_sha256")?;
         if !pins.is_empty() {
-            if !supports_public_key_pin(ty) {
+            if !supports_certificate_pinning(ty) {
                 return Err(format!("Mihomo 的 {ty} 暂未适配 certificate_public_key_sha256 公钥固定"));
             }
             if pins.iter().any(|pin| !base64::engine::general_purpose::STANDARD.decode(pin).is_ok_and(|bytes| bytes.len() == 32)) {
@@ -1007,6 +1007,24 @@ fn convert_tls(
             }
             out.insert("fingerprint".into(), json!(format!("{PUBLIC_KEY_PIN_PREFIX}{}", pins.join(","))));
         }
+    }
+    if let Some(value) = tls.remove("certificate_fingerprint").filter(|value| !value.is_null() && value != "") {
+        let fingerprint = value.as_str().ok_or("certificate_fingerprint 必须是字符串")?;
+        let hex = fingerprint.replace(':', "");
+        let hex = hex.trim();
+        if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("certificate_fingerprint 需要十六进制 SHA-256 证书指纹".into());
+        }
+        if !supports_certificate_pinning(ty) {
+            return Err(format!("Mihomo 的 {ty} 暂未适配 certificate_fingerprint"));
+        }
+        if out.contains_key("fingerprint") || tls.contains_key("certificate") || tls.contains_key("certificate_path")
+            || tls.get("disable_sni") == Some(&json!(true))
+            || tls.get("reality").and_then(|reality| reality.get("enabled")) == Some(&json!(true))
+        {
+            return Err("无法同时转换证书指纹与公钥固定、自定义信任证书、禁用 SNI 或 REALITY".into());
+        }
+        out.insert("fingerprint".into(), value);
     }
     if matches!(ty, "vmess" | "vless" | "socks5" | "http") {
         out.insert("tls".into(), json!(true));
