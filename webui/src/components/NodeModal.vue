@@ -124,17 +124,17 @@ async function submit(overwrite = false) {
     formVersion.value = version.value
     conflict.value = undefined
   }
-  const content = form.content.trim()
+  const content = form.content
+  const hasContent = content.trim().length > 0
   busy.value = true
   try {
     if (props.node) {
       const body: { name?: string; format?: Format; content?: string; version: number } = { version: formVersion.value }
       if (form.name.trim() && form.name.trim() !== base.value?.name) body.name = form.name.trim()
-      // Sent as written: a YAML block scalar keeps its trailing newline.
-      if (form.content !== original.value) {
-        if (!content) throw new Error('节点内容不能为空')
+      if (content !== original.value) {
+        if (!hasContent) throw new Error('节点内容不能为空')
         body.format = form.format
-        body.content = form.content
+        body.content = content
       }
       if (body.name === undefined && body.content === undefined) {
         emit('close')
@@ -143,7 +143,8 @@ async function submit(overwrite = false) {
       await call(client.PUT('/nodes/{id}', { params: { path: { id: props.node.id } }, body }))
       toast('ok', '已保存')
     } else {
-      if (!content) throw new Error('请先粘贴节点')
+      // Preserve indentation and trailing newlines in YAML copied from a full config.
+      if (!hasContent) throw new Error('请先粘贴节点')
       const answer = await call(client.POST('/nodes', { body: { format: form.format, content, version: formVersion.value } }))
       const ids = answer.nodes.map((node) => node.id)
       let joined = ''

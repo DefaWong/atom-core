@@ -1430,8 +1430,10 @@ pub(crate) fn from_links(content: &str) -> Result<Vec<Imported>, String> {
 }
 
 fn clash_maps(content: &str) -> Result<Vec<Map<String, Value>>, String> {
-    let value: Value =
-        yaml_serde::from_str(content).map_err(|error| format!("YAML 无法解析: {error}"))?;
+    let value: Value = match yaml_serde::from_str(content) {
+        Ok(value) => value,
+        Err(error) => inline_clash_list(content).ok_or_else(|| format!("YAML 无法解析: {error}"))?,
+    };
     let proxies = match value {
         Value::Object(mut map) if map.contains_key("proxies") => match map.remove("proxies") {
             Some(Value::Array(items)) => items,
@@ -1450,6 +1452,22 @@ fn clash_maps(content: &str) -> Result<Vec<Map<String, Value>>, String> {
             })
         })
         .collect()
+}
+
+/// Pasted inline nodes can have misaligned list markers. Retry only when
+/// every item is a complete flow mapping on its own line.
+fn inline_clash_list(content: &str) -> Option<Value> {
+    let entries = content.lines().map(str::trim_start)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'));
+    let nodes = entries.map(|line| {
+        let item = line.strip_prefix("- ")?.trim_start();
+        if !item.starts_with('{') {
+            return None;
+        }
+        let node: Value = yaml_serde::from_str(item).ok()?;
+        node.is_object().then_some(node)
+    }).collect::<Option<Vec<_>>>()?;
+    (!nodes.is_empty()).then_some(Value::Array(nodes))
 }
 
 #[cfg(test)]

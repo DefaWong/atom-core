@@ -1748,6 +1748,32 @@ fn a_shadowtls_pair_is_saved_edited_and_exported_as_one_node() {
     assert!(api.outbound(&shadowtls_tag).is_null());
 }
 
+#[test]
+fn imports_pasted_inline_clash_nodes_with_misaligned_dashes() {
+    use serde_json::json;
+    let api = Api::new("inline-clash-paste");
+    let pasted = r#"  - {name: first, type: ss, server: ss.test, port: 443, cipher: aes-128-gcm, password: '  first:#  '}
+  - {name: second, type: trojan, server: trojan.test, port: 443, password: 'second:#', sni: tls.test}
+"#;
+    // The previous import form trimmed the clipboard text before submitting it.
+    let misaligned = pasted.trim();
+    assert!(yaml_serde::from_str::<Value>(misaligned).is_err());
+    let body = |content: &str| json!({"format":"yaml","content":content}).to_string();
+    let malformed = format!("{misaligned}\n - {{name: broken");
+    let (status, refused) = api.call("POST", "/api/v1/atom/nodes", &body(&malformed));
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(api.call("GET", "/api/v1/atom/nodes", "").1["nodes"], json!([]));
+
+    let (status, imported) = api.call("POST", "/api/v1/atom/nodes", &body(misaligned));
+    assert_eq!(status, 201, "{imported}");
+    let nodes = imported["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes[0]["name"], "first");
+    assert_eq!(nodes[0]["outbound"]["password"], "  first:#  ");
+    assert_eq!(nodes[1]["name"], "second");
+    assert_eq!(nodes[1]["outbound"]["tls"]["server_name"], "tls.test");
+}
+
 /// `POST nodes/delete` deletes several nodes with one sing-box reload; when
 /// any ID is refused nothing changes and every refused ID is listed.
 #[test]
