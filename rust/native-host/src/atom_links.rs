@@ -791,6 +791,11 @@ fn clash_tls_options(proxy: &Map<String, Value>, enabled: bool) -> Option<Value>
         settings.insecure = true;
     }
     let mut tls = settings.value()?;
+    if let Some(pins) = proxy.get("fingerprint").and_then(Value::as_str)
+        .and_then(|fingerprint| fingerprint.strip_prefix(crate::atom_mihomo::PUBLIC_KEY_PIN_PREFIX))
+    {
+        tls["certificate_public_key_sha256"] = json!(pins.split(',').collect::<Vec<_>>());
+    }
     if tuic && proxy.contains_key("disable-sni") {
         tls["disable_sni"] = json!(settings.disable_sni);
     }
@@ -1165,10 +1170,13 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
             outbound
         }
         "tuic" => {
-            if proxy.contains_key("heartbeat-interval") {
-                return Err("TUIC 的 heartbeat-interval 是 QUIC 保活，sing-box 的 heartbeat 是协议心跳".into());
-            }
             let mut outbound = base("tuic", &server, port)?;
+            if let Some(value) = proxy.get("heartbeat-interval") {
+                let interval = value.as_str()
+                    .and_then(|value| value.strip_prefix(crate::atom_mihomo::TUIC_HEARTBEAT_PREFIX))
+                    .ok_or("TUIC 的数字 heartbeat-interval 是 QUIC 保活，sing-box 的 heartbeat 是协议心跳")?;
+                outbound.insert("heartbeat".into(), json!(interval));
+            }
             outbound.insert("uuid".into(), json!(raw(proxy, "uuid")));
             let password = raw(proxy, "password");
             if !password.is_empty() {

@@ -95,7 +95,7 @@ fn clash_defaults_convert_without_dropping_enabled_mihomo_options() {
 }
 
 #[test]
-fn tuic_default_timeout_converts_and_switch_preview_describes_both_blockers() {
+fn tuic_default_timeout_and_atom_protocol_heartbeat_round_trip() {
     let mut proxy = json!({"type":"tuic","server":"test.example","port":443,
         "uuid":"5f0b2c1e-0000-4000-8000-000000000001","password":"sample","request-timeout":8000});
     let mut node = singbox_from_clash(proxy.as_object().unwrap()).unwrap();
@@ -104,8 +104,13 @@ fn tuic_default_timeout_converts_and_switch_preview_describes_both_blockers() {
 
     node.outbound.insert("heartbeat".into(), json!("10s"));
     node.outbound.get_mut("tls").unwrap()["certificate_public_key_sha256"] = json!(["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="]);
-    let reason = crate::atom_mihomo::convert_proxy(&node).unwrap_err();
-    assert!(reason.contains("协议心跳") && reason.contains("certificate_public_key_sha256"));
+    let mut converted = crate::atom_mihomo::convert_proxy(&node).unwrap().as_object().unwrap().clone();
+    converted.remove("name");
+    assert_eq!(converted["heartbeat-interval"], "tuic:10s");
+    assert_eq!(converted["fingerprint"], "spki-sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+    assert_eq!(singbox_from_clash(&converted).unwrap().outbound, node.outbound);
+    converted.insert("heartbeat-interval".into(), json!(10000));
+    assert!(singbox_from_clash(&converted).unwrap_err().contains("QUIC 保活"));
     node.outbound.remove("heartbeat");
     node.outbound.get_mut("tls").unwrap()["certificate_public_key_sha256"] = json!([]);
     assert!(crate::atom_mihomo::convert_proxy(&node).is_ok());

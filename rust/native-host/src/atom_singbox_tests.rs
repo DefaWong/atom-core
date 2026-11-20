@@ -1276,17 +1276,23 @@ fn shared_http_tuic_and_tls_settings_stay_equivalent() {
     let key = pem("PRIVATE KEY", &client.signing_key.serialize_der());
     // Public ECH config for the reserved .test domain, produced by sing-box.
     let ech = concat!("AEP+DQA/AAAgACCVOWFGmkp/IF9W/lqOE9aHZt9cnU6vowfF2y5b+PEfDAAMAAEA", "AQABAAIAAQADAAhlY2gudGVzdAAA");
+    let pin = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
     let fixtures = [
         json!({"type":"http", "server":"http.test", "server_port":443,
             "username":"u", "password":"p", "headers":{"X-Proxy-Token":"sample"},
             "tls":{"enabled":true, "server_name":"tls.test", "client_certificate":cert, "client_key":key}}),
         json!({"type":"tuic", "server":"tuic.test", "server_port":443,
             "uuid":"9b1c2e4a-0000-4000-8000-000000000001", "password":"p", "udp_over_stream":true,
-            "disable_path_mtu_discovery":true, "zero_rtt_handshake":false,
-            "tls":{"enabled":true, "alpn":["h3"]}}),
+            "disable_path_mtu_discovery":true, "zero_rtt_handshake":false, "heartbeat":"5s",
+            "tls":{"enabled":true, "alpn":["h3"], "certificate_public_key_sha256":[pin]}}),
         json!({"type":"hysteria2", "server":"hy.test", "server_port":443, "password":"p",
             "bbr_profile":"conservative", "tls":{"enabled":true, "ech":{"enabled":true,
-            "config":format!("-----BEGIN ECH CONFIGS-----\n{ech}\n-----END ECH CONFIGS-----\n")}}}),
+            "config":format!("-----BEGIN ECH CONFIGS-----\n{ech}\n-----END ECH CONFIGS-----\n")},
+            "certificate_public_key_sha256":[pin]}}),
+        json!({"type":"trojan", "server":"trojan.test", "server_port":443, "password":"p",
+            "tls":{"enabled":true, "certificate_public_key_sha256":[pin], "utls":{"enabled":true,"fingerprint":"chrome"}}}),
+        json!({"type":"anytls", "server":"anytls.test", "server_port":443, "password":"p",
+            "tls":{"enabled":true, "certificate_public_key_sha256":[pin], "utls":{"enabled":true,"fingerprint":"chrome"}}}),
     ];
 
     let mut state = ProxyState::default();
@@ -1299,6 +1305,7 @@ fn shared_http_tuic_and_tls_settings_stay_equivalent() {
                 assert_eq!(proxy["certificate"], cert);
             }
             "tuic" => {
+                assert_eq!(proxy["heartbeat-interval"], "tuic:5s");
                 assert_eq!(proxy["udp-over-stream-version"], 2);
                 assert_eq!(proxy["reduce-rtt"], false);
                 assert_eq!(proxy["disable-mtu-discovery"], true);
@@ -1307,7 +1314,11 @@ fn shared_http_tuic_and_tls_settings_stay_equivalent() {
                 assert_eq!(proxy["bbr-profile"], "conservative");
                 assert_eq!(proxy["ech-opts"]["config"], ech);
             }
+            "trojan" | "anytls" => assert_eq!(proxy["client-fingerprint"], "chrome"),
             _ => unreachable!(),
+        }
+        if proxy["type"] != "http" {
+            assert_eq!(proxy["fingerprint"], format!("spki-sha256:{pin}"));
         }
         let back = crate::atom_links::singbox_from_clash(&proxy).unwrap().outbound;
         assert_eq!(&Value::Object(back.clone()), original);
@@ -1320,9 +1331,9 @@ fn shared_http_tuic_and_tls_settings_stay_equivalent() {
     let mut tuic = fixtures[1].clone();
     tuic["tls"]["disable_sni"] = json!(true);
     assert!(convert(tuic).unwrap_err().contains("证书校验"));
-    let mut tuic = fixtures[1].clone();
-    tuic["heartbeat"] = json!("5s");
-    assert!(convert(tuic).unwrap_err().contains("协议心跳"));
+    let mut invalid_pin = fixtures[3].clone();
+    invalid_pin["tls"]["certificate_public_key_sha256"] = json!(["invalid"]);
+    assert!(convert(invalid_pin).unwrap_err().contains("Base64"));
     let legacy = crate::atom_links::import_clash_yaml(
         "{name: legacy, type: tuic, server: tuic.test, port: 443, uuid: 9b1c2e4a-0000-4000-8000-000000000001, password: p, udp-over-stream: true}",
     ).unwrap();

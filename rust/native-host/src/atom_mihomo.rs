@@ -1,10 +1,18 @@
 //! Generates the Mihomo configuration from Atom's saved nodes and rules.
 
+use base64::Engine as _;
 use serde_json::{Map, Value, json};
 
 use crate::atom_proxy::{self, FINAL, GroupKind, Node, ProxyState};
 use crate::atom_rules::Action;
 use crate::atom_singbox::{Host, IpRule};
+
+pub(crate) const PUBLIC_KEY_PIN_PREFIX: &str = "spki-sha256:";
+pub(crate) const TUIC_HEARTBEAT_PREFIX: &str = "tuic:";
+
+fn supports_public_key_pin(ty: &str) -> bool {
+    matches!(ty, "hysteria2" | "tuic" | "trojan" | "anytls")
+}
 
 /// Removes the subscription caches (`providers/p-*.yaml`) that the live
 /// configuration no longer names, e.g. after a URL change or a removal.
@@ -409,22 +417,6 @@ pub(crate) fn convert_outbound(id: &str, outbound: &Map<String, Value>) -> Resul
         Some(other) => return Err(format!("mihomo 未支持转换 {other} 节点")),
         None => return Err("节点缺少 type".to_owned()),
     };
-    let mut unsupported = Vec::new();
-    if ty == "tuic" && options.contains_key("heartbeat") {
-        unsupported.push("TUIC 的 heartbeat 是协议心跳，Mihomo 的 heartbeat-interval 是 QUIC 保活");
-    }
-    if let Some(tls) = options.get("tls") {
-        if tls.get("enabled") == Some(&json!(true))
-            && tls.get("certificate_public_key_sha256").is_some_and(|pins| {
-                !pins.is_null() && !pins.as_array().is_some_and(Vec::is_empty)
-            })
-        {
-            unsupported.push("Mihomo 无法保留 certificate_public_key_sha256 公钥固定，fingerprint 校验的是整张证书");
-        }
-    }
-    if !unsupported.is_empty() {
-        return Err(unsupported.join("。"));
-    }
     let mut out = Map::from_iter([
         ("name".to_owned(), json!(id)),
         ("type".to_owned(), json!(ty)),
@@ -623,6 +615,10 @@ pub(crate) fn convert_outbound(id: &str, outbound: &Map<String, Value>) -> Resul
 }
 
 fn convert_tuic(options: &mut Map<String, Value>, out: &mut Map<String, Value>) -> Result<(), String> {
+    if let Some(value) = options.remove("heartbeat").filter(|value| !value.is_null()) {
+        let interval = value.as_str().ok_or("TUIC heartbeat 需要时间字符串")?;
+        out.insert("heartbeat-interval".into(), json!(format!("{TUIC_HEARTBEAT_PREFIX}{interval}")));
+    }
     copy(options, out, &[
         ("disable_path_mtu_discovery", "disable-mtu-discovery"),
         ("zero_rtt_handshake", "reduce-rtt"),
@@ -995,8 +991,23 @@ fn convert_tls(
         }
         return Ok(());
     }
-    // Nonempty pins were rejected before translating the outbound.
-    tls.remove("certificate_public_key_sha256");
+    if let Some(value) = tls.remove("certificate_public_key_sha256").filter(|value| !value.is_null()) {
+        let pins = take_strings(value, "certificate_public_key_sha256")?;
+        if !pins.is_empty() {
+            if !supports_public_key_pin(ty) {
+                return Err(format!("Mihomo 的 {ty} 暂未适配 certificate_public_key_sha256 公钥固定"));
+            }
+            if pins.iter().any(|pin| !base64::engine::general_purpose::STANDARD.decode(pin).is_ok_and(|bytes| bytes.len() == 32)) {
+                return Err("certificate_public_key_sha256 需要 32 字节的 Base64 公钥哈希".into());
+            }
+            if tls.contains_key("certificate") || tls.contains_key("certificate_path")
+                || tls.get("reality").and_then(|reality| reality.get("enabled")) == Some(&json!(true))
+            {
+                return Err("无法同时转换证书公钥固定与自定义信任证书或 REALITY".into());
+            }
+            out.insert("fingerprint".into(), json!(format!("{PUBLIC_KEY_PIN_PREFIX}{}", pins.join(","))));
+        }
+    }
     if matches!(ty, "vmess" | "vless" | "socks5" | "http") {
         out.insert("tls".into(), json!(true));
     }
