@@ -327,12 +327,7 @@ fn convert_shadowtls(id: &str, outbound: &Map<String, Value>, shadowtls: &Map<St
     transport.remove("type");
     copy(&mut transport, &mut ss, &[("server", "server"), ("server_port", "server_port")]);
     let mut out = object(convert_outbound(id, &ss)?, "Shadowsocks")?;
-    if out.get("udp-over-tcp") == Some(&json!(true)) {
-        // sing-box uses UDP-over-TCP in place of multiplex when both are set.
-        out.remove("smux");
-    } else if out.get("smux").is_some() && out["udp"] == false {
-        out["smux"]["only-tcp"] = json!(true);
-    } else if !out.contains_key("smux") {
+    if out.get("udp-over-tcp") != Some(&json!(true)) && !out.contains_key("smux") {
         // The ShadowTLS dialer has no native UDP transport.
         out.insert("udp".into(), json!(false));
     }
@@ -414,6 +409,22 @@ pub(crate) fn convert_outbound(id: &str, outbound: &Map<String, Value>) -> Resul
         Some(other) => return Err(format!("mihomo 未支持转换 {other} 节点")),
         None => return Err("节点缺少 type".to_owned()),
     };
+    let mut unsupported = Vec::new();
+    if ty == "tuic" && options.contains_key("heartbeat") {
+        unsupported.push("TUIC 的 heartbeat 是协议心跳，Mihomo 的 heartbeat-interval 是 QUIC 保活");
+    }
+    if let Some(tls) = options.get("tls") {
+        if tls.get("enabled") == Some(&json!(true))
+            && tls.get("certificate_public_key_sha256").is_some_and(|pins| {
+                !pins.is_null() && !pins.as_array().is_some_and(Vec::is_empty)
+            })
+        {
+            unsupported.push("Mihomo 无法保留 certificate_public_key_sha256 公钥固定，fingerprint 校验的是整张证书");
+        }
+    }
+    if !unsupported.is_empty() {
+        return Err(unsupported.join("。"));
+    }
     let mut out = Map::from_iter([
         ("name".to_owned(), json!(id)),
         ("type".to_owned(), json!(ty)),
@@ -597,7 +608,14 @@ pub(crate) fn convert_outbound(id: &str, outbound: &Map<String, Value>) -> Resul
         }
     }
     if let Some(multiplex) = options.remove("multiplex").filter(|value| !value.is_null()) {
-        convert_multiplex(object(multiplex, "multiplex")?, &mut out)?;
+        let multiplex = object(multiplex, "multiplex")?;
+        // sing-box uses UDP-over-TCP in place of multiplex when both are set on SS.
+        if ty != "ss" || out.get("udp-over-tcp") != Some(&json!(true)) {
+            convert_multiplex(multiplex, &mut out)?;
+        }
+    }
+    if out.get("udp") == Some(&json!(false)) && out.contains_key("smux") {
+        out["smux"]["only-tcp"] = json!(true);
     }
     convert_dial_fields(&mut options, &mut out, ty)?;
     no_extra(&options)?;
@@ -605,9 +623,6 @@ pub(crate) fn convert_outbound(id: &str, outbound: &Map<String, Value>) -> Resul
 }
 
 fn convert_tuic(options: &mut Map<String, Value>, out: &mut Map<String, Value>) -> Result<(), String> {
-    if options.contains_key("heartbeat") {
-        return Err("TUIC 的 heartbeat 是协议心跳，Mihomo 的 heartbeat-interval 是 QUIC 保活".into());
-    }
     copy(options, out, &[
         ("disable_path_mtu_discovery", "disable-mtu-discovery"),
         ("zero_rtt_handshake", "reduce-rtt"),
@@ -980,6 +995,8 @@ fn convert_tls(
         }
         return Ok(());
     }
+    // Nonempty pins were rejected before translating the outbound.
+    tls.remove("certificate_public_key_sha256");
     if matches!(ty, "vmess" | "vless" | "socks5" | "http") {
         out.insert("tls".into(), json!(true));
     }

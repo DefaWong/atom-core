@@ -56,6 +56,62 @@ fn vless_reality_and_transports() {
 }
 
 #[test]
+fn clash_defaults_convert_without_dropping_enabled_mihomo_options() {
+    let plain = json!({"type":"vless","server":"test.example","port":443,"uuid":"5f0b2c1e-0000-4000-8000-000000000001",
+        "network":"tcp","udp":true,"tls":true,"reality-opts":{"public-key":"test-key","short-id":""},
+        "brutal-opts":{"enabled":false,"up":"1000 Mbps","down":"1000 Mbps"},
+        "smux":{"enabled":false,"protocol":"h2mux","statistic":true}});
+    let converted = singbox_from_clash(plain.as_object().unwrap()).unwrap();
+    assert_eq!(converted.outbound["tls"]["reality"]["public_key"], "test-key");
+    assert!(converted.outbound["tls"]["reality"].get("short_id").is_none());
+    assert!(!converted.outbound.contains_key("multiplex"));
+
+    let mut proxy = json!({"name":"mux","type":"ss","server":"test.example","port":443,"cipher":"aes-128-gcm","password":"sample",
+        "udp":false,"smux":{"enabled":true,"protocol":"h2mux","max-connections":"8","only-tcp":false,"padding":false,
+            "statistic":false,"brutal-opts":{"enabled":false,"up":"1000 Mbps","down":"1000 Mbps"}}});
+    let convert = |value: &Value| {
+        let mut proxy = value.as_object().unwrap().clone();
+        proxy.remove("name");
+        singbox_from_clash(&proxy)
+    };
+    let mux = convert(&proxy).unwrap();
+    assert!(!mux.outbound.contains_key("network"), "Mihomo smux still carries UDP");
+    assert_eq!(mux.outbound["multiplex"], json!({"enabled":true,"protocol":"h2mux","max_connections":8}));
+
+    proxy["smux"]["only-tcp"] = json!(true);
+    let tcp = convert(&proxy).unwrap();
+    assert_eq!(tcp.outbound["network"], "tcp");
+    let back = crate::atom_mihomo::convert_proxy(&tcp).unwrap();
+    assert_eq!(back["udp"], false);
+    assert_eq!(back["smux"]["only-tcp"], true);
+    proxy["udp"] = json!(true);
+    assert!(convert(&proxy).unwrap_err().contains("独立 UDP"));
+
+    proxy["smux"]["only-tcp"] = json!(false);
+    proxy["smux"]["statistic"] = json!(true);
+    assert!(convert(&proxy).unwrap_err().contains("smux.statistic"));
+    let saved = import_clash_yaml(&proxy.to_string()).unwrap();
+    assert_eq!(saved[0].mihomo.as_ref().unwrap()["smux"], proxy["smux"]);
+}
+
+#[test]
+fn tuic_default_timeout_converts_and_switch_preview_describes_both_blockers() {
+    let mut proxy = json!({"type":"tuic","server":"test.example","port":443,
+        "uuid":"5f0b2c1e-0000-4000-8000-000000000001","password":"sample","request-timeout":8000});
+    let mut node = singbox_from_clash(proxy.as_object().unwrap()).unwrap();
+    proxy["request-timeout"] = json!(9000);
+    assert!(singbox_from_clash(proxy.as_object().unwrap()).unwrap_err().contains("request-timeout"));
+
+    node.outbound.insert("heartbeat".into(), json!("10s"));
+    node.outbound.get_mut("tls").unwrap()["certificate_public_key_sha256"] = json!(["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="]);
+    let reason = crate::atom_mihomo::convert_proxy(&node).unwrap_err();
+    assert!(reason.contains("协议心跳") && reason.contains("certificate_public_key_sha256"));
+    node.outbound.remove("heartbeat");
+    node.outbound.get_mut("tls").unwrap()["certificate_public_key_sha256"] = json!([]);
+    assert!(crate::atom_mihomo::convert_proxy(&node).is_ok());
+}
+
+#[test]
 fn vmess_base64_json() {
     let body = json!({"v": "2", "ps": "日本", "add": "jp.example", "port": "443", "id": "uuid-1", "aid": 0,
         "scy": "auto", "net": "ws", "host": "jp.example", "path": "/v", "tls": "tls", "sni": "jp.example"});
@@ -487,7 +543,7 @@ fn clash_smux_rates_units_and_protocols_follow_mihomo() {
     assert!(rate("50 mbps").is_err());
     assert!(rate("100 Kbps").is_err());
     assert!(from_clash_yaml("- {name: s, type: socks5, server: v, port: 1, smux: {enabled: true}}").is_err());
-    assert!(from_clash_yaml("- {name: o, type: vless, server: v, port: 1, uuid: u, smux: {enabled: true, only-tcp: true}}").is_err());
+    assert!(from_clash_yaml("- {name: o, type: vless, server: v, port: 1, uuid: u, udp: true, smux: {enabled: true, only-tcp: true}}").is_err());
     assert!(from_clash_yaml("- {name: o, type: vless, server: v, port: 1, uuid: u, smux: {enabled: true, only_tcp: true}}").is_err());
     let any = from_clash_yaml("- {name: a, type: anytls, server: v, port: 1, password: p, tfo: true}").unwrap();
     assert!(any[0].1.get("tcp_fast_open").is_none());

@@ -672,6 +672,10 @@ fn section(proxy: &Map<String, Value>, key: &str) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
+fn smux_carries_udp(smux: &Map<String, Value>) -> bool {
+    truthy(smux, "enabled") && !truthy(smux, "only-tcp")
+}
+
 /// mihomo `smux` (and `brutal-opts`) to sing-box `multiplex`; both are
 /// sing-mux. A switched-off block is dropped.
 fn clash_smux(proxy: &Map<String, Value>, kind: &str) -> Result<Option<Value>, String> {
@@ -682,8 +686,11 @@ fn clash_smux(proxy: &Map<String, Value>, kind: &str) -> Result<Option<Value>, S
     if !matches!(kind, "ss" | "vmess" | "vless" | "trojan") {
         return Err(format!("sing-box 的 {kind} 节点不支持多路复用（smux）"));
     }
-    if truthy(&smux, "only-tcp") || truthy(&smux, "only_tcp") {
-        return Err("sing-box 的多路复用没有 only-tcp".into());
+    if truthy(&smux, "only-tcp") && truthy(proxy, "udp") {
+        return Err("Mihomo 的 smux.only-tcp 允许独立 UDP，sing-box 无法保留这种组合".into());
+    }
+    if truthy(&smux, "only_tcp") {
+        return Err("不支持 smux.only_tcp，请使用 Mihomo 的 only-tcp 字段".into());
     }
     let mut multiplex = Map::from_iter([("enabled".to_owned(), json!(true))]);
     let protocol = text(&smux, "protocol");
@@ -1319,7 +1326,10 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
     };
     put(&mut outbound, "multiplex", clash_smux(proxy, &kind)?);
     clash_dial_fields(proxy, &mut outbound, &kind)?;
-    if matches!(kind.as_str(), "ss" | "socks5" | "vless" | "vmess" | "trojan" | "snell") && !truthy(proxy, "udp") {
+    // Mihomo's smux advertises UDP independently of the underlying proxy's flag.
+    if matches!(kind.as_str(), "ss" | "socks5" | "vless" | "vmess" | "trojan" | "snell")
+        && !truthy(proxy, "udp") && !smux_carries_udp(&section(proxy, "smux"))
+    {
         outbound.insert("network".into(), json!("tcp"));
     }
     // sing-box rejects it on AnyTLS and it means nothing over QUIC.
@@ -1483,19 +1493,6 @@ fn clash_shadowtls(proxy: &Map<String, Value>) -> Result<Node, String> {
     let mut ss = proxy.clone();
     ss.remove("plugin");
     ss.remove("plugin-opts");
-    let mut smux = section(proxy, "smux");
-    if truthy(&smux, "enabled") {
-        if truthy(&smux, "only-tcp") {
-            if truthy(proxy, "udp") {
-                return Err("Mihomo 的 ShadowTLS 使用 TCP 多路复用及独立 UDP，sing-box 无法等价转换".into());
-            }
-            smux.remove("only-tcp");
-            ss.insert("smux".into(), Value::Object(smux));
-        } else {
-            // A Mihomo mux proxy advertises UDP even when the underlying proxy disables it.
-            ss.insert("udp".into(), json!(true));
-        }
-    }
     let (name, mut outbound) = clash_proxy(&ss)?;
     if truthy(proxy, "udp") && !truthy(proxy, "udp-over-tcp") && !outbound.contains_key("multiplex") {
         return Err("Mihomo 的 SS ShadowTLS 裸 UDP 无法通过 sing-box 的 ShadowTLS 出站".into());
@@ -1553,17 +1550,7 @@ pub(crate) fn singbox_from_clash(proxy: &Map<String, Value>) -> Result<Node, Str
     let converted = crate::atom_mihomo::convert_proxy(&node)
         .map_err(|error| format!("无法保留 Mihomo 配置：{error}"))?;
     let mut comparable = proxy.clone();
-    if node.shadowtls.is_some() {
-        let smux = section(proxy, "smux");
-        if truthy(&smux, "enabled") && !truthy(&smux, "only-tcp") {
-            comparable.remove("udp");
-            if let Some(Value::Object(options)) = comparable.get_mut("smux") {
-                if options.get("only-tcp") == Some(&json!(false)) {
-                    options.remove("only-tcp");
-                }
-            }
-        }
-    }
+    normalize_clash_defaults(&mut comparable, &kind);
     if kind == "hysteria2" && node.outbound.contains_key("realm") {
         comparable.remove("server");
         comparable.remove("port");
@@ -1612,6 +1599,40 @@ pub(crate) fn singbox_from_clash(proxy: &Map<String, Value>) -> Result<Node, Str
         return Err(format!("转换到 sing-box 无法保留字段：{}", lost.join("、")));
     }
     Ok(node)
+}
+
+/// Compare settings that take effect. This only touches the copy used for
+/// comparison, so native YAML retained for a blocked node stays intact.
+fn normalize_clash_defaults(proxy: &mut Map<String, Value>, kind: &str) {
+    let disabled = |opts: &Map<String, Value>| opts.get("enabled").is_none_or(|value| value == false || value.is_null());
+    if proxy.get("brutal-opts").and_then(Value::as_object).is_some_and(disabled) {
+        proxy.remove("brutal-opts");
+    }
+    if proxy.get("smux").and_then(Value::as_object).is_some_and(disabled) {
+        proxy.remove("smux");
+    } else if let Some(Value::Object(smux)) = proxy.get_mut("smux") {
+        let mux_udp = smux_carries_udp(smux);
+        for key in ["only-tcp", "statistic", "padding"] {
+            if smux.get(key).is_some_and(|value| value == false) {
+                smux.remove(key);
+            }
+        }
+        if smux.get("brutal-opts").and_then(Value::as_object).is_some_and(disabled) {
+            smux.remove("brutal-opts");
+        }
+        if mux_udp && proxy.get("udp").is_some_and(Value::is_boolean) {
+            proxy.remove("udp");
+        }
+    }
+    if let Some(Value::Object(reality)) = proxy.get_mut("reality-opts") {
+        // Both cores decode an absent or empty short ID to eight zero bytes.
+        if reality.get("short-id").is_some_and(|value| value == "") {
+            reality.remove("short-id");
+        }
+    }
+    if kind == "tuic" && matches!(text(proxy, "request-timeout").as_str(), "0" | "8000") {
+        proxy.remove("request-timeout");
+    }
 }
 
 /// Also accept equivalent scalar spellings used by both YAML decoders.
