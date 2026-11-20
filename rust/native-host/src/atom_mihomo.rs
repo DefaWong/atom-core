@@ -306,7 +306,15 @@ fn proxy(node: &Node) -> Result<Value, String> {
 }
 
 pub(crate) fn convert_proxy(node: &Node) -> Result<Value, String> {
-    let mut options = node.outbound.clone();
+    if let Some(mut proxy) = node.mihomo.clone() {
+        proxy.insert("name".into(), json!(node.id));
+        return Ok(Value::Object(proxy));
+    }
+    convert_outbound(&node.id, &node.outbound)
+}
+
+pub(crate) fn convert_outbound(id: &str, outbound: &Map<String, Value>) -> Result<Value, String> {
+    let mut options = outbound.clone();
     let kind = options.remove("type").unwrap_or_default();
     let ty = match kind.as_str() {
         Some("shadowsocks") => "ss",
@@ -315,7 +323,7 @@ pub(crate) fn convert_proxy(node: &Node) -> Result<Value, String> {
             ty @ ("vless" | "vmess" | "trojan" | "hysteria2" | "tuic" | "anytls" | "http"
             | "hysteria" | "ssh" | "snell"),
         ) => ty,
-        Some("wireguard") => return convert_wireguard(node, options),
+        Some("wireguard") => return convert_wireguard(id, options),
         Some("naive") => return Err("mihomo 没有 naive 协议".to_owned()),
         Some("shadowtls") => {
             return Err("mihomo 的 shadowtls 只能作为其他协议的插件，不能做独立节点".to_owned());
@@ -325,7 +333,7 @@ pub(crate) fn convert_proxy(node: &Node) -> Result<Value, String> {
         None => return Err("节点缺少 type".to_owned()),
     };
     let mut out = Map::from_iter([
-        ("name".to_owned(), json!(node.id)),
+        ("name".to_owned(), json!(id)),
         ("type".to_owned(), json!(ty)),
     ]);
     copy(
@@ -349,16 +357,69 @@ pub(crate) fn convert_proxy(node: &Node) -> Result<Value, String> {
             ("udp_relay_mode", "udp-relay-mode"),
         ],
     );
-    if matches!(ty, "ss" | "socks5" | "vless" | "vmess" | "trojan" | "anytls" | "snell") {
+    if matches!(ty, "ss" | "socks5" | "vless" | "vmess" | "trojan" | "snell") {
+        let udp = match options.remove("network") {
+            None => true,
+            Some(value) => {
+                let networks = take_strings(value, "network")?;
+                if networks.is_empty() || networks.iter().any(|network| network == "tcp") {
+                    networks.is_empty() || networks.iter().any(|network| network == "udp")
+                } else {
+                    return Err("Mihomo 节点无法禁用 TCP 而只保留 UDP".into());
+                }
+            }
+        };
+        out.insert("udp".into(), json!(udp));
+    } else if ty == "anytls" {
         out.insert("udp".into(), json!(true));
     }
+    if ty == "vless" && out["udp"] == true && out.get("packet-encoding").is_some_and(|value| value == "") {
+        return Err("Mihomo 的 VLESS UDP 必须使用 XUDP 或 packetaddr".into());
+    }
     match ty {
+        "vmess" => {
+            out.entry("alterId").or_insert(json!(0));
+            if out.get("cipher").and_then(Value::as_str).is_none_or(str::is_empty) {
+                out.insert("cipher".into(), json!("auto"));
+            }
+            copy(&mut options, &mut out, &[
+                ("global_padding", "global-padding"),
+                ("authenticated_length", "authenticated-length"),
+            ]);
+        }
         "hysteria" => convert_hysteria(&mut options, &mut out)?,
+        "http" => {
+            if out.get("username").and_then(Value::as_str).is_some_and(|user| !user.is_empty())
+                && out.get("password").and_then(Value::as_str).is_none_or(str::is_empty)
+            {
+                return Err("Mihomo 的 HTTP Basic 认证需要非空密码".into());
+            }
+            if let Some(headers) = options.remove("headers") {
+                let headers = http_connect_headers(headers, &out)?;
+                out.insert("headers".into(), Value::Object(headers));
+            }
+        }
+        "tuic" => convert_tuic(&mut options, &mut out)?,
         "ssh" => convert_ssh(&mut options, &mut out)?,
         "snell" => convert_snell(&mut options, &mut out)?,
+        "anytls" => {
+            copy(&mut options, &mut out, &[("min_idle_session", "min-idle-session"), ("client_metadata", "client-metadata")]);
+            for (source, target) in [("idle_session_check_interval", "idle-session-check-interval"), ("idle_session_timeout", "idle-session-timeout")] {
+                if let Some(value) = options.remove(source) {
+                    out.insert(target.into(), json!(seconds(&value, source)?));
+                }
+            }
+        }
         _ => {}
     }
     if ty == "hysteria2" {
+        if let Some(realm) = options.remove("realm").filter(|value| !value.is_null()) {
+            if out.contains_key("server") || out.contains_key("port") || options.contains_key("server_ports") {
+                return Err("Hysteria2 Realm 不能与固定服务器或跳端口同时使用".into());
+            }
+            convert_realm(realm, &mut out)?;
+        }
+        copy(&mut options, &mut out, &[("bbr_profile", "bbr-profile")]);
         for (source, target) in [("up_mbps", "up"), ("down_mbps", "down")] {
             if let Some(value) = options.remove(source) {
                 let mbps = value
@@ -367,8 +428,31 @@ pub(crate) fn convert_proxy(node: &Node) -> Result<Value, String> {
                 out.insert(target.into(), json!(format!("{mbps} Mbps")));
             }
         }
+        convert_hysteria_ports(&mut options, &mut out, true)?;
     }
     if ty == "ss" {
+        if let Some(uot) = options.remove("udp_over_tcp") {
+            let version = match uot {
+                Value::Bool(true) => Some(2),
+                Value::Bool(false) | Value::Null => None,
+                value => {
+                    let mut config = object(value, "udp_over_tcp")?;
+                    let enabled = config.remove("enabled").is_some_and(|value| value == true);
+                    let version = match config.remove("version") {
+                        None => 2,
+                        Some(value) if value == 0 || value == 2 => 2,
+                        Some(value) if value == 1 => 1,
+                        _ => return Err("udp_over_tcp.version 必须是 1 或 2".into()),
+                    };
+                    no_extra(&config)?;
+                    enabled.then_some(version)
+                }
+            };
+            out.insert("udp-over-tcp".into(), json!(version.is_some()));
+            if let Some(version) = version {
+                out.insert("udp-over-tcp-version".into(), json!(version));
+            }
+        }
         if let Some(plugin) = options.remove("plugin") {
             let plugin = match plugin.as_str() {
                 Some("obfs-local") => "obfs",
@@ -392,6 +476,10 @@ pub(crate) fn convert_proxy(node: &Node) -> Result<Value, String> {
                     }
                     Some(("path", value)) => {
                         values.insert("path".into(), json!(value));
+                    }
+                    Some(("mux", value)) if plugin == "v2ray-plugin" => {
+                        let streams: i64 = value.parse().map_err(|_| "v2ray-plugin mux 必须是整数")?;
+                        values.insert("mux".into(), json!(streams > 0));
                     }
                     None if pair == "tls" => {
                         values.insert("tls".into(), json!(true));
@@ -422,17 +510,84 @@ pub(crate) fn convert_proxy(node: &Node) -> Result<Value, String> {
         // sing-box reads an empty transport (or an empty type) as plain TCP.
         let plain = transport.iter().all(|(key, value)| key == "type" && value == "");
         if !plain {
+            check_transport_semantics(ty, &transport, &out, tls_enabled)?;
             convert_transport(transport, &mut out, tls_enabled)?;
         }
     }
     if let Some(multiplex) = options.remove("multiplex").filter(|value| !value.is_null()) {
         convert_multiplex(object(multiplex, "multiplex")?, &mut out)?;
     }
-    if let Some(tfo) = options.remove("tcp_fast_open") {
-        out.insert("tfo".into(), tfo);
-    }
+    convert_dial_fields(&mut options, &mut out, ty)?;
     no_extra(&options)?;
     Ok(Value::Object(out))
+}
+
+fn convert_tuic(options: &mut Map<String, Value>, out: &mut Map<String, Value>) -> Result<(), String> {
+    if options.contains_key("heartbeat") {
+        return Err("TUIC 的 heartbeat 是协议心跳，Mihomo 的 heartbeat-interval 是 QUIC 保活".into());
+    }
+    copy(options, out, &[
+        ("disable_path_mtu_discovery", "disable-mtu-discovery"),
+        ("zero_rtt_handshake", "reduce-rtt"),
+    ]);
+    if let Some(enabled) = options.remove("udp_over_stream") {
+        if enabled == true {
+            if out.get("udp-relay-mode").and_then(Value::as_str).is_some_and(|mode| !mode.is_empty()) {
+                return Err("TUIC 的 udp_over_stream 不能和 udp_relay_mode 同时启用".into());
+            }
+            // sing-box always opens the UoT v2 stream. Mihomo defaults to v1.
+            out.insert("udp-over-stream-version".into(), json!(2));
+        }
+        out.insert("udp-over-stream".into(), enabled);
+    }
+    Ok(())
+}
+
+fn http_connect_headers(value: Value, proxy: &Map<String, Value>) -> Result<Map<String, Value>, String> {
+    let mut out = Map::new();
+    for (name, value) in single_value_headers(value)? {
+        if hyper::header::HeaderName::from_bytes(name.as_bytes()).is_err()
+            || value.as_str().is_none_or(|text| hyper::header::HeaderValue::from_str(text).is_err())
+        {
+            return Err("HTTP CONNECT 的请求头名称或值无效".into());
+        }
+        let lower = name.to_ascii_lowercase();
+        // These headers alter Go's request serialization or credential handling.
+        if matches!(lower.as_str(), "host" | "content-length" | "transfer-encoding" | "trailer")
+            || (lower == "user-agent" && (name != "User-Agent" || value == ""))
+            || (lower == "proxy-connection" && name != "Proxy-Connection")
+            || (lower == "proxy-authorization"
+                && proxy.get("username").and_then(Value::as_str).is_some_and(|user| !user.is_empty()))
+            || out.keys().any(|key: &String| key.eq_ignore_ascii_case(&name))
+        {
+            return Err(format!("HTTP CONNECT 的请求头 {name} 无法等价转换"));
+        }
+        out.insert(name, value);
+    }
+    Ok(out)
+}
+
+fn convert_dial_fields(
+    options: &mut Map<String, Value>, out: &mut Map<String, Value>, ty: &str,
+) -> Result<(), String> {
+    copy(options, out, &[("bind_interface", "interface-name"), ("tcp_fast_open", "tfo")]);
+    if !matches!(ty, "wireguard" | "hysteria" | "hysteria2" | "tuic") {
+        copy(options, out, &[("tcp_multi_path", "mptcp")]);
+    }
+    if let Some(mark) = options.remove("routing_mark") {
+        let number = mark.as_u64().and_then(|mark| u32::try_from(mark).ok()).or_else(|| {
+            let text = mark.as_str()?;
+            if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+                u32::from_str_radix(hex, 16).ok()
+            } else if text == "0" || !text.starts_with('0') {
+                text.parse().ok()
+            } else {
+                None
+            }
+        }).ok_or_else(|| "routing_mark 无法转换为 mihomo 的整数 routing-mark".to_owned())?;
+        out.insert("routing-mark".into(), json!(number));
+    }
+    Ok(())
 }
 
 /// sing-box `multiplex` (and its `brutal`) to mihomo `smux`; both are
@@ -483,6 +638,9 @@ fn convert_multiplex(multiplex: Map<String, Value>, out: &mut Map<String, Value>
 
 fn convert_obfs(obfs: Value, out: &mut Map<String, Value>) -> Result<(), String> {
     let mut obfs = object(obfs, "obfs")?;
+    if obfs.get("type").and_then(Value::as_str) == Some("gecko") {
+        copy(&mut obfs, out, &[("min_packet_size", "obfs-min-packet-size"), ("max_packet_size", "obfs-max-packet-size")]);
+    }
     copy(
         &mut obfs,
         out,
@@ -512,6 +670,7 @@ fn seconds(value: &Value, what: &str) -> Result<u64, String> {
         Value::Number(number) => number
             .as_u64()
             .ok_or_else(|| format!("{what} 必须是整数秒")),
+        Value::String(text) if text == "0s" || text == "0" => Ok(0),
         Value::String(text) => atom_proxy::duration_secs(text)
             .map_err(|_| format!("{what} `{text}` 无效：写成 30s、3m 这样的形式")),
         _ => Err(format!("{what} 必须是时长")),
@@ -524,6 +683,13 @@ fn convert_hysteria(
     options: &mut Map<String, Value>,
     out: &mut Map<String, Value>,
 ) -> Result<(), String> {
+    let pmtu = options.remove("disable_path_mtu_discovery");
+    let legacy_pmtu = options.remove("disable_mtu_discovery");
+    if pmtu.is_some() || legacy_pmtu.is_some() {
+        let disabled = pmtu.as_ref().is_some_and(|value| value == true)
+            || legacy_pmtu.as_ref().is_some_and(|value| value == true);
+        out.insert("disable-mtu-discovery".into(), json!(disabled));
+    }
     for (text, mbps, target) in [("up", "up_mbps", "up"), ("down", "down_mbps", "down")] {
         let value = options.remove(text).or_else(|| {
             options
@@ -545,16 +711,69 @@ fn convert_hysteria(
     } else {
         copy(options, out, &[("auth", "auth")]);
     }
+    convert_hysteria_ports(options, out, false)
+}
+
+fn convert_hysteria_ports(
+    options: &mut Map<String, Value>, out: &mut Map<String, Value>, ranged: bool,
+) -> Result<(), String> {
     if let Some(ports) = options.remove("server_ports") {
-        let ports: Vec<String> = take_strings(ports, "server_ports")?
-            .into_iter()
-            .map(|range| range.replace(':', "-"))
-            .collect();
+        let ports = take_strings(ports, "server_ports")?.into_iter().map(|range| {
+            let (start, end) = range.split_once(':').ok_or("server_ports 需要起点:终点")?;
+            let start = if start.is_empty() { "0" } else { start };
+            let end = if end.is_empty() { "65535" } else { end };
+            Ok(if start == end { start.to_owned() } else { format!("{start}-{end}") })
+        }).collect::<Result<Vec<_>, &str>>()?;
         out.insert("ports".into(), json!(ports.join(",")));
     }
-    if let Some(interval) = options.remove("hop_interval") {
+    if ranged {
+        let start = options.remove("hop_interval");
+        let end = options.remove("hop_interval_max");
+        if start.is_some() || end.is_some() {
+            let start = start.as_ref().map(|value| seconds(value, "hop_interval")).transpose()?.unwrap_or(0);
+            let end = end.as_ref().map(|value| seconds(value, "hop_interval_max")).transpose()?.unwrap_or(0);
+            let (start, end) = match (start, end) {
+                (0, 0) => (30, 30),
+                (start, 0) => (start, start),
+                bounds => bounds,
+            };
+            if start < 5 || end < start {
+                return Err("mihomo 的 hop-interval 起点至少为 5 秒，且终点不能小于起点".into());
+            }
+            let interval = if start == end { start.to_string() } else { format!("{start}-{end}") };
+            out.insert("hop-interval".into(), json!(interval));
+        }
+    } else if let Some(interval) = options.remove("hop_interval") {
         out.insert("hop-interval".into(), json!(seconds(&interval, "hop_interval")?));
     }
+    Ok(())
+}
+
+pub(crate) fn realm_address(url: &str) -> Result<(String, u16), String> {
+    let parsed = url::Url::parse(url).map_err(|_| "Hysteria2 Realm URL 无效")?;
+    let host = parsed.host_str().ok_or("Hysteria2 Realm URL 缺少域名或 IP")?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Hysteria2 Realm URL 需要 HTTP 或 HTTPS".into());
+    }
+    let port = parsed.port_or_known_default().ok_or("Hysteria2 Realm URL 缺少端口")?;
+    Ok((host.trim_start_matches('[').trim_end_matches(']').to_owned(), port))
+}
+
+fn convert_realm(value: Value, out: &mut Map<String, Value>) -> Result<(), String> {
+    let mut realm = object(value, "realm")?;
+    let url = realm.get("server_url").and_then(Value::as_str).ok_or("Hysteria2 Realm 缺少 server_url")?;
+    let (host, port) = realm_address(url)?;
+    // Mihomo requires a top-level server for the node and uses it as the
+    // default TLS name. Realm supplies the actual peer address during dialing.
+    out.insert("server".into(), json!(host));
+    out.insert("port".into(), json!(port));
+    let mut opts = Map::from_iter([("enable".to_owned(), json!(true))]);
+    copy(&mut realm, &mut opts, &[("server_url", "server-url"), ("realm_id", "realm-id"), ("token", "token")]);
+    if let Some(servers) = realm.remove("stun_servers") {
+        opts.insert("stun-servers".into(), json!(take_strings(servers, "realm.stun_servers")?));
+    }
+    no_extra(&realm)?;
+    out.insert("realm-opts".into(), Value::Object(opts));
     Ok(())
 }
 
@@ -607,9 +826,9 @@ fn convert_snell(
 
 /// WireGuard is an endpoint in sing-box (`address`, `peers`); mihomo takes
 /// it as a proxy with `ip`/`ipv6` and `peers`.
-fn convert_wireguard(node: &Node, mut options: Map<String, Value>) -> Result<Value, String> {
+fn convert_wireguard(id: &str, mut options: Map<String, Value>) -> Result<Value, String> {
     let mut out = Map::from_iter([
-        ("name".to_owned(), json!(node.id)),
+        ("name".to_owned(), json!(id)),
         ("type".to_owned(), json!("wireguard")),
         ("udp".to_owned(), json!(true)),
     ]);
@@ -662,6 +881,7 @@ fn convert_wireguard(node: &Node, mut options: Map<String, Value>) -> Result<Val
     if let Some(interval) = keepalive.filter(|interval| *interval != json!(0)) {
         out.insert("persistent-keepalive".into(), interval);
     }
+    convert_dial_fields(&mut options, &mut out, "wireguard")?;
     no_extra(&options)?;
     Ok(Value::Object(out))
 }
@@ -686,28 +906,52 @@ fn convert_tls(
         "http" | "trojan" | "hysteria" | "hysteria2" | "tuic" | "anytls" => "sni",
         _ => return Err("mihomo 未支持转换此节点的 TLS 选项".into()),
     };
-    copy(
-        &mut tls,
-        out,
-        &[
-            ("server_name", sni),
-            ("insecure", "skip-cert-verify"),
-            ("alpn", "alpn"),
-        ],
-    );
+    copy(&mut tls, out, &[("server_name", sni), ("insecure", "skip-cert-verify")]);
+    if ty != "http" {
+        if let Some(alpn) = tls.remove("alpn") {
+            out.insert("alpn".into(), json!(take_strings(alpn, "tls.alpn")?));
+        }
+    }
     if ty == "tuic" {
+        if tls.get("disable_sni").is_some_and(|value| value == true)
+            && out.get("skip-cert-verify").is_none_or(|value| value != true)
+        {
+            return Err("Mihomo 的 TUIC disable-sni 会同时跳过证书校验".into());
+        }
         copy(&mut tls, out, &[("disable_sni", "disable-sni")]);
+    }
+    if let Some(ech) = tls.remove("ech").filter(|value| !value.is_null()) {
+        convert_ech(ech, out, ty)?;
+    }
+    if tls.contains_key("client_certificate") || tls.contains_key("client_key") {
+        let cert = tls.remove("client_certificate").ok_or("mTLS 缺少 client_certificate")?;
+        let key = tls.remove("client_key").ok_or("mTLS 缺少 client_key")?;
+        out.insert("certificate".into(), json!(inline_tls_value(cert, "client_certificate", "CERTIFICATE")?));
+        out.insert("private-key".into(), json!(inline_tls_value(key, "client_key", "PRIVATE KEY")?));
     }
     if let Some(utls) = tls.remove("utls") {
         let mut utls = object(utls, "utls")?;
         if utls.remove("enabled").is_some_and(|value| value == true) {
-            copy(&mut utls, out, &[("fingerprint", "client-fingerprint")]);
+            if matches!(ty, "vmess" | "vless" | "trojan" | "anytls") {
+                let fingerprint = utls.remove("fingerprint").filter(|value| value != "").unwrap_or(json!("chrome"));
+                out.insert("client-fingerprint".into(), fingerprint);
+            } else {
+                return Err(format!("Mihomo 的 {ty} 节点没有 client-fingerprint 选项"));
+            }
             no_extra(&utls)?;
         }
     }
     if let Some(reality) = tls.remove("reality") {
         let mut reality = object(reality, "reality")?;
         if reality.remove("enabled").is_some_and(|value| value == true) {
+            if !matches!(ty, "vmess" | "vless" | "trojan") {
+                return Err(format!("Mihomo 的 {ty} 节点没有 reality-opts"));
+            }
+            if out.get("ech-opts").and_then(|opts| opts.get("enable")).is_some_and(|value| value == true)
+                || out.contains_key("certificate")
+            {
+                return Err("REALITY 与 ECH 或 mTLS 的组合无法等价转换".into());
+            }
             let mut opts = Map::new();
             copy(
                 &mut reality,
@@ -719,6 +963,63 @@ fn convert_tls(
         }
     }
     no_extra(&tls)
+}
+
+fn inline_tls_value(value: Value, key: &str, label: &str) -> Result<String, String> {
+    let text = take_strings(value, key)?.join("\n");
+    let end = format!("{label}-----");
+    if text.lines().any(|line| line.starts_with("-----BEGIN ") && line.ends_with(&end)) {
+        return Ok(text);
+    }
+    Err(format!("{key} 需要内联 PEM"))
+}
+
+fn convert_ech(value: Value, out: &mut Map<String, Value>, ty: &str) -> Result<(), String> {
+    let mut ech = object(value, "ech")?;
+    if !matches!(ty, "vmess" | "vless" | "trojan" | "anytls" | "hysteria" | "hysteria2" | "tuic") {
+        return Err(format!("Mihomo 的 {ty} 节点没有 ech-opts"));
+    }
+    let mut opts = Map::new();
+    copy(&mut ech, &mut opts, &[("enabled", "enable"), ("query_server_name", "query-server-name")]);
+    if let Some(config) = ech.remove("config") {
+        let pem = take_strings(config, "ech.config")?.join("\n");
+        let body = pem.trim().strip_prefix("-----BEGIN ECH CONFIGS-----")
+            .and_then(|text| text.strip_suffix("-----END ECH CONFIGS-----"))
+            .ok_or("ech.config 需要 ECH CONFIGS PEM")?;
+        let base64: String = body.split_whitespace().collect();
+        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &base64)
+            .map_err(|_| "ech.config 里的 Base64 无效")?;
+        if bytes.is_empty() {
+            return Err("ech.config 不能为空".into());
+        }
+        opts.insert("config".into(), json!(base64));
+    }
+    no_extra(&ech)?;
+    out.insert("ech-opts".into(), Value::Object(opts));
+    Ok(())
+}
+
+fn check_transport_semantics(
+    protocol: &str,
+    transport: &Map<String, Value>,
+    proxy: &Map<String, Value>,
+    tls: bool,
+) -> Result<(), String> {
+    let transport = transport.get("type").and_then(Value::as_str).unwrap_or_default();
+    if protocol == "trojan" && transport == "http" {
+        return Err("Mihomo Trojan 不支持 HTTP/H2 传输".into());
+    }
+    let forced_alpn = match (protocol, transport, tls) {
+        ("vmess" | "vless", "ws" | "httpupgrade", true) => Some("http/1.1"),
+        ("vmess" | "vless", "http" | "grpc", true) | ("trojan", "grpc", true) => Some("h2"),
+        _ => None,
+    };
+    if let (Some(expected), Some(Value::Array(alpn))) = (forced_alpn, proxy.get("alpn")) {
+        if !alpn.is_empty() && (alpn.len() != 1 || alpn[0] != expected) {
+            return Err(format!("Mihomo 的 {protocol}/{transport} 会把 ALPN 固定为 {expected}"));
+        }
+    }
+    Ok(())
 }
 
 fn convert_transport(
@@ -735,18 +1036,27 @@ fn convert_transport(
                 &mut opts,
                 &[
                     ("path", "path"),
-                    ("headers", "headers"),
                     ("max_early_data", "max-early-data"),
                     ("early_data_header_name", "early-data-header-name"),
                 ],
             );
+            if let Some(headers) = transport.remove("headers") {
+                opts.insert("headers".into(), Value::Object(single_value_headers(headers)?));
+            }
             "ws"
         }
         Some("httpupgrade") => {
             opts.insert("v2ray-http-upgrade".into(), json!(true));
             copy(&mut transport, &mut opts, &[("path", "path")]);
+            let mut headers = transport.remove("headers").map(single_value_headers).transpose()?.unwrap_or_default();
+            if headers.keys().any(|key| key.eq_ignore_ascii_case("host")) {
+                return Err("HTTP Upgrade headers 的 Host 应使用 host 字段".into());
+            }
             if let Some(host) = transport.remove("host") {
-                opts.insert("headers".into(), json!({"Host":host}));
+                headers.insert("Host".into(), host);
+            }
+            if !headers.is_empty() {
+                opts.insert("headers".into(), Value::Object(headers));
             }
             "ws"
         }
@@ -778,13 +1088,16 @@ fn convert_transport(
                 opts.insert("path".into(), json!([path]));
             }
             let mut headers = Map::new();
-            if let Some(Value::Object(values)) = transport.remove("headers") {
-                for (name, value) in values {
-                    let list = match value {
-                        Value::Array(list) => list,
-                        value => vec![value],
-                    };
-                    headers.insert(name, Value::Array(list));
+            if let Some(values) = transport.remove("headers") {
+                for (name, value) in object(values, "HTTP headers")? {
+                    if name.eq_ignore_ascii_case("Host") {
+                        return Err("HTTP transport 的 Host 应使用 host 字段".into());
+                    }
+                    let list = take_strings(value, "HTTP header")?;
+                    if list.len() != 1 {
+                        return Err(format!("HTTP transport 的 {name} 多值请求头在两内核中行为不同"));
+                    }
+                    headers.insert(name, json!(list));
                 }
             }
             if let Some(host) = transport.remove("host") {
@@ -805,4 +1118,14 @@ fn convert_transport(
     out.insert("network".into(), json!(network));
     out.insert(format!("{network}-opts"), Value::Object(opts));
     Ok(())
+}
+
+fn single_value_headers(headers: Value) -> Result<Map<String, Value>, String> {
+    object(headers, "headers")?.into_iter().map(|(name, value)| {
+        let mut values = take_strings(value, "请求头")?;
+        if values.len() != 1 {
+            return Err(format!("Mihomo 的请求头 {name} 只支持一个值"));
+        }
+        Ok((name, json!(values.remove(0))))
+    }).collect()
 }

@@ -73,7 +73,7 @@ tags:
   - name: rulesets
     description: Builtin sets and custom (remote or local) rulesets rules reference.
   - name: nodes
-    description: Proxy nodes (sing-box outbounds).
+    description: Proxy nodes.
   - name: groups
     description: Node groups (selector, urltest).
   - name: final
@@ -676,9 +676,9 @@ paths:
         hysteria2/hy2, tuic, anytls, socks), `yaml` (Clash/mihomo `proxies`, also
         snell, ssh, hysteria and wireguard) or
         `json` (sing-box outbounds; `content` may then be a JSON value; a `wireguard` item
-        is the options of an endpoint). All or
-        nothing: one item that does not convert refuses the whole import (400,
-        "第 N 项"), and the resulting configuration must pass `sing-box check`.
+        is the options of an endpoint). A Mihomo proxy without a lossless sing-box form
+        keeps its original configuration. Malformed imports are rejected as a batch.
+        The active kernel validates the generated configuration before applying it.
       operationId: importNodes
       requestBody:
         required: true
@@ -863,7 +863,8 @@ paths:
       description: |
         A sing-box outbound (JSON, `tag` is the name) or a Clash/mihomo proxy (YAML, `name`), as
         `PUT /nodes/{id}` takes back in `format` and `content`. Without `format`, the active kernel's:
-        `yaml` for mihomo, `json` for sing-box.
+        `yaml` for mihomo, `json` for sing-box. A node stored as native Mihomo YAML
+        defaults to YAML under either kernel.
       operationId: exportNode
       parameters:
         - name: format
@@ -888,7 +889,7 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
         "422":
-          description: The node has no mihomo form (`yaml`).
+          description: The node cannot be exported losslessly in the requested format.
           content:
             application/json:
               schema:
@@ -1429,9 +1430,9 @@ paths:
         To sing-box: every fallback and load-balance group needs an entry in
         `group_actions` (`urltest` changes its type for good; `delete` deletes it like
         `DELETE /groups/{id}?confirm=true`: the rules that proxy to it move to Final); a missing
-        one gives 409 with `groups`. Subscriptions are kept but do not run. To mihomo: when
+        one gives 409 with `groups`. Subscriptions are kept but do not run. When
         nodes cannot be converted, the request needs `confirm_inactive_nodes: true`, else 409 with
-        `nodes`; those nodes stay saved but are inactive until sing-box is selected again.
+        `nodes`. Those nodes keep their original configuration and are inactive under the target kernel.
       operationId: putSettings
       requestBody:
         required: true
@@ -1454,7 +1455,7 @@ paths:
                     enum: [urltest, delete]
                 confirm_inactive_nodes:
                   type: boolean
-                  description: Switching to mihomo only, accepting that the nodes it cannot run stay inactive.
+                  description: Accept that the nodes the target kernel cannot run stay inactive.
                 fakeip_range:
                   type: string
                 resolver:
@@ -1484,8 +1485,8 @@ paths:
         "409":
           description: |
             Stale version, or a switch that needs a decision. `groups` (to sing-box): the fallback
-            and load-balance groups without a `group_actions` entry, `{id, name, type}`. `nodes` (to
-            mihomo): the nodes it cannot run, `{id, name, type, reason}`.
+            and load-balance groups without a `group_actions` entry, `{id, name, type}`.
+            `nodes`: the nodes the target cannot run, `{id, name, type, reason}`.
           content:
             application/json:
               schema:
@@ -1535,7 +1536,7 @@ paths:
                     description: Subscriptions; they stay saved but do not run under sing-box.
                   inactive_nodes:
                     type: array
-                    description: Nodes the target cannot run (always empty for sing-box).
+                    description: Nodes the target kernel cannot run.
                     items:
                       type: object
                       properties:
@@ -4096,12 +4097,12 @@ components:
           type: object
           description: |
             The whole sing-box outbound, credentials included (without `tag`). A `wireguard` node is the options of a
-            sing-box endpoint (`address`, `private_key`, `peers`).
+            sing-box endpoint (`address`, `private_key`, `peers`). Empty for a node stored in Mihomo form.
         active:
           type: boolean
           description: |
-            False when the selected kernel cannot run the node (mihomo only). It stays saved, is left
-            out of the mihomo configuration and of the groups' members there, and runs again under sing-box.
+            False when the selected kernel cannot run the node. It stays saved and is omitted from that
+            kernel's configuration and group members.
         inactive_reason:
           type: string
           nullable: true

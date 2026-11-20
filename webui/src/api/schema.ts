@@ -264,9 +264,9 @@ export interface paths {
          *     hysteria2/hy2, tuic, anytls, socks), `yaml` (Clash/mihomo `proxies`, also
          *     snell, ssh, hysteria and wireguard) or
          *     `json` (sing-box outbounds; `content` may then be a JSON value; a `wireguard` item
-         *     is the options of an endpoint). All or
-         *     nothing: one item that does not convert refuses the whole import (400,
-         *     "第 N 项"), and the resulting configuration must pass `sing-box check`.
+         *     is the options of an endpoint). A Mihomo proxy without a lossless sing-box form
+         *     keeps its original configuration. Malformed imports are rejected as a batch.
+         *     The active kernel validates the generated configuration before applying it.
          */
         post: operations["importNodes"];
         delete?: never;
@@ -335,7 +335,8 @@ export interface paths {
          * One node as text, to edit or copy
          * @description A sing-box outbound (JSON, `tag` is the name) or a Clash/mihomo proxy (YAML, `name`), as
          *     `PUT /nodes/{id}` takes back in `format` and `content`. Without `format`, the active kernel's:
-         *     `yaml` for mihomo, `json` for sing-box.
+         *     `yaml` for mihomo, `json` for sing-box. A node stored as native Mihomo YAML
+         *     defaults to YAML under either kernel.
          */
         get: operations["exportNode"];
         put?: never;
@@ -606,9 +607,9 @@ export interface paths {
          *     To sing-box: every fallback and load-balance group needs an entry in
          *     `group_actions` (`urltest` changes its type for good; `delete` deletes it like
          *     `DELETE /groups/{id}?confirm=true`: the rules that proxy to it move to Final); a missing
-         *     one gives 409 with `groups`. Subscriptions are kept but do not run. To mihomo: when
+         *     one gives 409 with `groups`. Subscriptions are kept but do not run. When
          *     nodes cannot be converted, the request needs `confirm_inactive_nodes: true`, else 409 with
-         *     `nodes`; those nodes stay saved but are inactive until sing-box is selected again.
+         *     `nodes`. Those nodes keep their original configuration and are inactive under the target kernel.
          */
         put: operations["putSettings"];
         post?: never;
@@ -2023,12 +2024,12 @@ export interface components {
             server_port?: number;
             /**
              * @description The whole sing-box outbound, credentials included (without `tag`). A `wireguard` node is the options of a
-             *     sing-box endpoint (`address`, `private_key`, `peers`).
+             *     sing-box endpoint (`address`, `private_key`, `peers`). Empty for a node stored in Mihomo form.
              */
             outbound: Record<string, never>;
             /**
-             * @description False when the selected kernel cannot run the node (mihomo only). It stays saved, is left
-             *     out of the mihomo configuration and of the groups' members there, and runs again under sing-box.
+             * @description False when the selected kernel cannot run the node. It stays saved and is omitted from that
+             *     kernel's configuration and group members.
              */
             active?: boolean;
             /** @description Why the node is inactive, in words for the user. */
@@ -3154,7 +3155,7 @@ export interface operations {
                 };
             };
             404: components["responses"]["Error"];
-            /** @description The node has no mihomo form (`yaml`). */
+            /** @description The node cannot be exported losslessly in the requested format. */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -3774,7 +3775,7 @@ export interface operations {
                     group_actions?: {
                         [key: string]: "urltest" | "delete";
                     };
-                    /** @description Switching to mihomo only, accepting that the nodes it cannot run stay inactive. */
+                    /** @description Accept that the nodes the target kernel cannot run stay inactive. */
                     confirm_inactive_nodes?: boolean;
                     fakeip_range?: string;
                     /** @description "" (follow the domestic upstreams), an IP, udp://IP[:port] or tcp://IP[:port]. */
@@ -3799,8 +3800,8 @@ export interface operations {
             400: components["responses"]["Error"];
             /**
              * @description Stale version, or a switch that needs a decision. `groups` (to sing-box): the fallback
-             *     and load-balance groups without a `group_actions` entry, `{id, name, type}`. `nodes` (to
-             *     mihomo): the nodes it cannot run, `{id, name, type, reason}`.
+             *     and load-balance groups without a `group_actions` entry, `{id, name, type}`.
+             *     `nodes`: the nodes the target cannot run, `{id, name, type, reason}`.
              */
             409: {
                 headers: {
@@ -3842,7 +3843,7 @@ export interface operations {
                         current?: string;
                         /** @description Subscriptions; they stay saved but do not run under sing-box. */
                         provider_count?: number;
-                        /** @description Nodes the target cannot run (always empty for sing-box). */
+                        /** @description Nodes the target kernel cannot run. */
                         inactive_nodes?: {
                             id?: string;
                             name?: string;

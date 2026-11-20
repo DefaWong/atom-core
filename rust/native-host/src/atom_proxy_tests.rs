@@ -4,10 +4,10 @@ use super::*;
 
 const RESERVED: &[u16] = &[6666, 53, 7892, 7893, 9090];
 
-fn node(name: &str) -> (String, Map<String, Value>) {
+fn node(name: &str) -> Node {
     let outbound =
         json!({"type": "trojan", "server": "a.example", "server_port": 443, "password": "x"});
-    (name.to_owned(), outbound.as_object().unwrap().clone())
+    Node::new(name.to_owned(), outbound.as_object().unwrap().clone())
 }
 
 fn group(name: &str, kind: GroupKind, members: &[&str]) -> GroupInput {
@@ -375,6 +375,7 @@ fn naive_node() -> Node {
     Node {
         id: "n-00000009".to_owned(),
         name: "N".to_owned(),
+        mihomo: None,
         outbound: serde_json::json!({"type":"naive","server":"n.example","server_port":443})
             .as_object()
             .unwrap()
@@ -522,6 +523,7 @@ fn subscriptions_behind_inactive_nodes_download_directly() {
     state.nodes.push(Node {
         id: kept.0.clone(),
         name: kept.1,
+        mihomo: None,
         outbound: json!({"type":"trojan","server":"t","server_port":1,"password":"p","tls":{"enabled":true}})
             .as_object().unwrap().clone(),
     });

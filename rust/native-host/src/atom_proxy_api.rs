@@ -92,14 +92,15 @@ fn node_view(
     inactive: &std::collections::BTreeMap<String, String>,
     node: &crate::atom_proxy::Node,
 ) -> Value {
+    let native = node.mihomo.as_ref().unwrap_or(&node.outbound);
     json!({
         "active": !inactive.contains_key(&node.id),
         "inactive_reason": inactive.get(&node.id),
         "id": node.id,
         "name": node.name,
-        "type": node.outbound.get("type"),
-        "server": node.outbound.get("server"),
-        "server_port": node.outbound.get("server_port"),
+        "type": node.kind(),
+        "server": native.get("server"),
+        "server_port": native.get("server_port").or_else(|| native.get("port")),
         "outbound": node.outbound,
         "groups": state.groups_containing(&node.id),
     })
@@ -161,7 +162,7 @@ fn inactive_list(state: &ProxyState, inactive: &std::collections::BTreeMap<Strin
         .iter()
         .filter_map(|node| {
             let reason = inactive.get(&node.id)?;
-            Some(json!({"id":node.id, "name":node.name, "type":node.outbound.get("type"), "reason":reason}))
+            Some(json!({"id":node.id, "name":node.name, "type":node.kind(), "reason":reason}))
         })
         .collect()
 }
@@ -320,7 +321,7 @@ pub(crate) fn export_node(state: &ProxyState, id: &str, query: Option<&str>) -> 
     let format = match query_value(query, "format") {
         Some("json") => "json",
         Some("yaml") => "yaml",
-        None if state.settings.backend == crate::atom_proxy::Backend::Mihomo => "yaml",
+        None if node.mihomo.is_some() || state.settings.backend == crate::atom_proxy::Backend::Mihomo => "yaml",
         None => "json",
         Some(other) => return Err(error(400, format!("不支持的 format `{other}`：json 或 yaml"))),
     };
@@ -335,15 +336,16 @@ pub(crate) fn export_node(state: &ProxyState, id: &str, query: Option<&str>) -> 
             .map_err(|e| error(500, format!("YAML 生成失败: {e}")))?;
         // Saved back, the text replaces the whole connection: offer it only
         // when it reads back as the same outbound.
-        let back = crate::atom_links::from_clash_yaml(&text).ok();
-        if back.as_deref().map(|nodes| nodes.iter().map(|n| &n.1).collect::<Vec<_>>())
-            != Some(vec![&node.outbound])
-        {
-            return Err(error(422, "这个节点的 Clash YAML 不能完整表示，请用 JSON 编辑"));
+        if node.mihomo.is_none() {
+            proxy.remove("name");
+            let back = crate::atom_links::singbox_from_clash(&proxy).map(|(_, outbound)| outbound);
+            if back.as_ref() != Ok(&node.outbound) {
+                return Err(error(422, "这个节点的 Clash YAML 不能完整表示，请用 JSON 编辑"));
+            }
         }
         text
     } else {
-        let mut outbound = node.outbound.clone();
+        let mut outbound = node.singbox_outbound().map_err(|message| error(422, message))?;
         outbound.insert("tag".into(), json!(node.name));
         serde_json::to_string_pretty(&ordered(&outbound, &["tag", "type", "server", "server_port"]))
             .map_err(|e| error(500, format!("JSON 生成失败: {e}")))?
@@ -352,14 +354,18 @@ pub(crate) fn export_node(state: &ProxyState, id: &str, query: Option<&str>) -> 
 }
 
 /// Converts import content (`format`: json, yaml or link) to nodes.
-fn parse_import(format: &str, content: Value) -> Result<Vec<crate::atom_links::Imported>, Reply> {
+fn parse_import(format: &str, content: Value) -> Result<Vec<crate::atom_proxy::Node>, Reply> {
     let text = content.as_str().map(str::to_owned);
+    if let ("yaml", Some(text)) = (format, text.as_deref()) {
+        return crate::atom_links::import_clash_yaml(text)
+            .and_then(|nodes| if nodes.is_empty() { Err("没有可导入的节点".into()) } else { Ok(nodes) })
+            .map_err(|message| error(400, message));
+    }
     let imported = match (format, text) {
         ("json", Some(text)) => {
             crate::atom_links::lenient_json(&text).and_then(crate::atom_links::from_singbox_json)
         }
         ("json", None) => crate::atom_links::from_singbox_json(content),
-        ("yaml", Some(text)) => crate::atom_links::from_clash_yaml(&text),
         ("link", Some(text)) => crate::atom_links::from_links(&text),
         ("yaml" | "link", None) => Err("content 必须是字符串".to_owned()),
         (other, _) => Err(format!("不支持的 format `{other}`：json、yaml 或 link")),
@@ -368,7 +374,7 @@ fn parse_import(format: &str, content: Value) -> Result<Vec<crate::atom_links::I
     if imported.is_empty() {
         return Err(error(400, "没有可导入的节点"));
     }
-    Ok(imported)
+    Ok(imported.into_iter().map(|(name, outbound)| crate::atom_proxy::Node::new(name, outbound)).collect())
 }
 
 async fn update_node(rules: &AtomRules, id: &str, bytes: &[u8]) -> Answer {
@@ -385,28 +391,21 @@ async fn update_node(rules: &AtomRules, id: &str, bytes: &[u8]) -> Answer {
     // No content: the connection stays as it is. With content, the node is
     // replaced whole by it; `name` (or the current name) wins over the one
     // in the content.
-    let yaml = match (&update.format, &update.content) {
-        (Some(format), Some(Value::String(text))) if format == "yaml" => Some(text.clone()),
-        _ => None,
-    };
-    let outbound = match (update.format, update.content) {
+    let imported = match (update.format, update.content) {
         (Some(format), Some(content)) => {
             let mut imported = parse_import(&format, content)?;
             if imported.len() != 1 {
                 return Err(error(400, "修改节点时 content 只能是一个节点"));
             }
-            Some(imported.remove(0).1)
+            imported.pop()
         }
         (None, None) => None,
         _ => return Err(error(400, "format 和 content 要一起给")),
     };
     let mut next = state(rules);
     let node = next
-        .update_node(id, update.name, outbound)
+        .update_node(id, update.name, imported)
         .map_err(|e| fail(&e))?;
-    if let Some(text) = yaml {
-        unkept_yaml(&text, &node)?;
-    }
     next.version += 1;
     let version = next.version;
     rules
@@ -417,62 +416,6 @@ async fn update_node(rules: &AtomRules, id: &str, bytes: &[u8]) -> Answer {
         200,
         &json!({ "version": version, "node": node_view(&next, &next.inactive_nodes(), &node) }),
     ))
-}
-
-/// A YAML edit is saved as the sing-box outbound it reads as: refuses it
-/// when a field written in it does not come back the same from that outbound
-/// (the importer leaves it out or reads it another way).
-fn unkept_yaml(text: &str, node: &crate::atom_proxy::Node) -> Result<(), Reply> {
-    let written = match yaml_serde::from_str::<Value>(text) {
-        Ok(Value::Object(mut map)) if map.contains_key("proxies") => {
-            map.remove("proxies").and_then(|list| list.get(0).cloned())
-        }
-        Ok(Value::Array(list)) => list.first().cloned(),
-        Ok(value) => Some(value),
-        Err(_) => None,
-    };
-    let saved = crate::atom_mihomo::convert_proxy(node)
-        .map_err(|reason| error(400, format!("保存后无法转换为 mihomo 节点：{reason}")))?;
-    let Some(Value::Object(mut written)) = written else {
-        return Ok(());
-    };
-    written.remove("name");
-    let mut lost = Vec::new();
-    unkept(&Value::Object(written), &saved, "", &mut lost);
-    if lost.is_empty() {
-        Ok(())
-    } else {
-        Err(error(400, format!("这些字段保存不了（导入时被忽略或改写）：{}", lost.join("、"))))
-    }
-}
-
-/// The paths in `written` that `saved` does not carry the same way; scalars
-/// compare as text, and a bare rate `n` is `n Mbps`.
-fn unkept(written: &Value, saved: &Value, path: &str, lost: &mut Vec<String>) {
-    let scalar = |value: &Value| match value {
-        Value::String(text) => Some(text.strip_suffix(" Mbps").filter(|n| n.bytes().all(|b| b.is_ascii_digit())).unwrap_or(text).to_owned()),
-        Value::Number(_) | Value::Bool(_) => Some(value.to_string()),
-        _ => None,
-    };
-    match (written, saved) {
-        (Value::Object(written), Value::Object(saved)) => {
-            for (key, value) in written {
-                let at = if path.is_empty() { key.clone() } else { format!("{path}.{key}") };
-                match saved.get(key) {
-                    Some(kept) => unkept(value, kept, &at, lost),
-                    None if value.is_null() => {}
-                    None => lost.push(at),
-                }
-            }
-        }
-        (Value::Array(written), Value::Array(saved)) if written.len() == saved.len() => {
-            for (index, (value, kept)) in written.iter().zip(saved).enumerate() {
-                unkept(value, kept, &format!("{path}[{index}]"), lost);
-            }
-        }
-        _ if scalar(written).is_some() && scalar(written) == scalar(saved) => {}
-        _ => lost.push(path.to_owned()),
-    }
 }
 
 async fn delete_node(rules: &AtomRules, id: &str, query: Option<&str>) -> Answer {
@@ -1000,7 +943,7 @@ async fn put_settings(
         /// Switching to sing-box: group ID → `urltest` or `delete`, for every
         /// fallback and load-balance group.
         group_actions: Option<std::collections::BTreeMap<String, String>>,
-        /// Switching to mihomo: the nodes it cannot run stay but are inactive.
+        /// Nodes the target cannot run stay in the saved state but are inactive.
         confirm_inactive_nodes: Option<bool>,
         fakeip_range: Option<String>,
         resolver: Option<String>,
@@ -1039,6 +982,16 @@ async fn put_settings(
         next.settings.backend = backend;
     }
     if switching {
+        let inactive = next.inactive_nodes();
+        if !inactive.is_empty() && request.confirm_inactive_nodes != Some(true) {
+            return reply_json(
+                409,
+                &json!({
+                    "error": format!("有节点在 {} 下不生效。原配置会保留，确认后切换（confirm_inactive_nodes）", next.settings.backend.name()),
+                    "nodes": inactive_list(&next, &inactive),
+                }),
+            );
+        }
         match next.settings.backend {
             crate::atom_proxy::Backend::SingBox => {
                 let actions = request.group_actions.unwrap_or_default();
@@ -1069,16 +1022,6 @@ async fn put_settings(
                 }
             }
             crate::atom_proxy::Backend::Mihomo => {
-                let inactive = next.inactive_nodes();
-                if !inactive.is_empty() && request.confirm_inactive_nodes != Some(true) {
-                    return reply_json(
-                        409,
-                        &json!({
-                            "error": "有节点 mihomo 无法运行：保留在 Atom 中但不生效。确认后切换（confirm_inactive_nodes）",
-                            "nodes": inactive_list(&next, &inactive),
-                        }),
-                    );
-                }
                 // A subscription downloaded through a node mihomo cannot run
                 // downloads directly from now on (the same transaction).
                 next.clear_inactive_downloads(&inactive);

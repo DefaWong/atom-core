@@ -138,13 +138,14 @@ pub(crate) fn generate(
     if host.backend == Backend::Mihomo {
         return crate::atom_mihomo::generate(host, state, ip_rules, resolver, secret);
     }
+    let state = &state.effective();
     let (resolver_kind, resolver_ip, resolver_port) = crate::atom_proxy::parse_resolver(resolver)?;
     let mut outbounds = Vec::new();
     // sing-box 1.13 moved WireGuard from the outbounds to the endpoints; a
     // group still refers to it by its tag.
     let mut endpoints = Vec::new();
     for node in &state.nodes {
-        let mut outbound = node.outbound.clone();
+        let mut outbound = node.singbox_outbound().map_err(|error| format!("节点 {} ({})：{error}", node.name, node.id))?;
         outbound.insert("tag".into(), json!(node.id));
         if outbound.get("type").and_then(Value::as_str) == Some("wireguard") {
             endpoints.push(Value::Object(outbound));

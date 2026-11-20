@@ -15,6 +15,8 @@
 
 use serde_json::{Map, Value, json};
 
+use crate::atom_proxy::Node;
+
 pub(crate) type Imported = (String, Map<String, Value>);
 
 fn obj(value: Value) -> Map<String, Value> {
@@ -187,13 +189,15 @@ fn base(kind: &str, server: &str, port: u16) -> Result<Map<String, Value>, Strin
     if server.is_empty() {
         return Err("缺少服务器地址".into());
     }
-    if port == 0 {
+    if port == 0 && kind != "hysteria2" {
         return Err("缺少端口".into());
     }
     let mut outbound = Map::new();
     outbound.insert("type".into(), json!(kind));
     outbound.insert("server".into(), json!(server));
-    outbound.insert("server_port".into(), json!(port));
+    if port != 0 {
+        outbound.insert("server_port".into(), json!(port));
+    }
     Ok(outbound)
 }
 
@@ -713,10 +717,20 @@ fn clash_smux(proxy: &Map<String, Value>, kind: &str) -> Result<Option<Value>, S
     Ok(Some(Value::Object(multiplex)))
 }
 
-/// `packet-encoding`, xudp when the proxy names none.
-fn packet_encoding(proxy: &Map<String, Value>) -> String {
-    let value = text(proxy, "packet-encoding");
-    if value.is_empty() { "xudp".to_owned() } else { value }
+fn packet_encoding(proxy: &Map<String, Value>, kind: &str) -> Result<&'static str, String> {
+    let packet_addr = truthy(proxy, "packet-addr");
+    let xudp = truthy(proxy, "xudp");
+    let encoding = text(proxy, "packet-encoding");
+    match (kind, encoding.as_str()) {
+        ("vless", "packet" | "packetaddr") => Ok("packetaddr"),
+        ("vless", "" | "xudp") => Ok(if xudp || !packet_addr { "xudp" } else { "packetaddr" }),
+        ("vmess", "" | "packet" | "packetaddr" | "xudp") => {
+            Ok(if xudp || encoding == "xudp" { "xudp" }
+                else if packet_addr || matches!(encoding.as_str(), "packet" | "packetaddr") { "packetaddr" }
+                else { "" })
+        }
+        _ => Err(format!("无法转换 {kind} 的 packet-encoding `{encoding}`")),
+    }
 }
 
 /// A mihomo rate (`StringToBps`: a bare integer is Mbps, otherwise
@@ -763,13 +777,67 @@ fn clash_tls(proxy: &Map<String, Value>, enabled: bool) -> Tls {
     }
 }
 
+fn clash_tls_options(proxy: &Map<String, Value>, enabled: bool) -> Option<Value> {
+    let mut settings = clash_tls(proxy, enabled);
+    let tuic = text(proxy, "type") == "tuic";
+    if tuic && settings.disable_sni && !proxy.contains_key("skip-cert-verify") {
+        settings.insecure = true;
+    }
+    let mut tls = settings.value()?;
+    if tuic && proxy.contains_key("disable-sni") {
+        tls["disable_sni"] = json!(settings.disable_sni);
+    }
+
+    // Mihomo uses these fields for the client identity. Its file paths are
+    // relative to its own data directory, so only inline PEM is portable.
+    let cert = raw(proxy, "certificate");
+    let key = raw(proxy, "private-key");
+    if cert.contains("-----BEGIN CERTIFICATE-----") && key.contains("PRIVATE KEY-----") {
+        tls["client_certificate"] = json!(cert);
+        tls["client_key"] = json!(key);
+    }
+
+    let opts = section(proxy, "ech-opts");
+    if !opts.is_empty() {
+        let mut ech = json!({"enabled": truthy(&opts, "enable")});
+        if let Some(name) = opts.get("query-server-name") {
+            ech["query_server_name"] = name.clone();
+        }
+        if let Some(Value::String(config)) = opts.get("config").filter(|value| *value != "") {
+            ech["config"] = json!(format!("-----BEGIN ECH CONFIGS-----\n{config}\n-----END ECH CONFIGS-----\n"));
+        }
+        tls["ech"] = ech;
+    }
+    Some(tls)
+}
+
 fn clash_transport(proxy: &Map<String, Value>) -> Result<Option<Value>, String> {
     let network = text(proxy, "network");
     match network.as_str() {
         "ws" => {
             let ws = section(proxy, "ws-opts");
-            let headers = section(&ws, "headers");
-            transport("ws", &text(&headers, "Host"), &text(&ws, "path"), "")
+            let mut converted = Map::new();
+            let mut headers = section(&ws, "headers");
+            if truthy(&ws, "v2ray-http-upgrade") {
+                converted.insert("type".into(), json!("httpupgrade"));
+                if let Some(host) = headers.remove("Host") {
+                    converted.insert("host".into(), host);
+                }
+            } else {
+                converted.insert("type".into(), json!("ws"));
+                for (source, target) in [("max-early-data", "max_early_data"), ("early-data-header-name", "early_data_header_name")] {
+                    if let Some(value) = ws.get(source) {
+                        converted.insert(target.into(), value.clone());
+                    }
+                }
+            }
+            if let Some(path) = ws.get("path") {
+                converted.insert("path".into(), path.clone());
+            }
+            if !headers.is_empty() {
+                converted.insert("headers".into(), Value::Object(headers));
+            }
+            Ok(Some(Value::Object(converted)))
         }
         "grpc" => {
             let grpc = section(proxy, "grpc-opts");
@@ -786,12 +854,24 @@ fn clash_transport(proxy: &Map<String, Value>) -> Result<Option<Value>, String> 
         }
         "http" => {
             let http = section(proxy, "http-opts");
-            let path = strings(&http, "path")
-                .into_iter()
-                .next()
-                .unwrap_or_default();
-            let headers = section(&http, "headers");
-            transport("http", &strings(&headers, "Host").join(","), &path, "")
+            let paths = strings(&http, "path");
+            if paths.len() > 1 {
+                return Err("sing-box 的 HTTP transport 只支持一个 path".into());
+            }
+            let mut headers = section(&http, "headers");
+            let host = headers.remove("Host");
+            let mut result = json!({"type":"http", "method":http.get("method").and_then(Value::as_str)
+                .filter(|method| !method.is_empty()).unwrap_or("GET")});
+            if let Some(path) = paths.first() {
+                result["path"] = json!(path);
+            }
+            if let Some(host) = host {
+                result["host"] = host;
+            }
+            if !headers.is_empty() {
+                result["headers"] = Value::Object(headers);
+            }
+            Ok(Some(result))
         }
         other => transport(other, "", "", ""),
     }
@@ -868,6 +948,11 @@ fn clash_wireguard(proxy: &Map<String, Value>) -> Result<Map<String, Value>, Str
     if mtu != 0 {
         outbound.insert("mtu".into(), json!(mtu));
     }
+    if let Some(workers) = proxy.get("workers") {
+        let workers = workers.as_i64().or_else(|| workers.as_str()?.parse().ok())
+            .ok_or("wireguard workers 必须是整数")?;
+        outbound.insert("workers".into(), json!(workers));
+    }
     outbound.insert("peers".into(), Value::Array(peers));
     Ok(outbound)
 }
@@ -876,7 +961,8 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
     let kind = text(proxy, "type");
     if kind == "wireguard" {
         clash_smux(proxy, &kind)?;
-        let outbound = clash_wireguard(proxy)?;
+        let mut outbound = clash_wireguard(proxy)?;
+        clash_dial_fields(proxy, &mut outbound, &kind)?;
         let name = text(proxy, "name");
         let name = if name.is_empty() {
             "wireguard".to_owned()
@@ -885,11 +971,28 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
         };
         return Ok((name, outbound));
     }
-    let port: u16 = text(proxy, "port")
-        .parse()
-        .map_err(|_| "端口无效".to_owned())?;
+    let realm = section(proxy, "realm-opts");
+    let uses_realm = kind == "hysteria2" && truthy(&realm, "enable");
+    let ports_only = kind == "hysteria2" && !text(proxy, "ports").is_empty()
+        && matches!(text(proxy, "port").as_str(), "" | "0");
+    let port: u16 = if ports_only || uses_realm {
+        0
+    } else {
+        text(proxy, "port").parse::<u16>().ok().filter(|port| *port != 0)
+            .ok_or_else(|| "端口无效".to_owned())?
+    };
     let server = text(proxy, "server");
     let mut outbound = match kind.as_str() {
+        "http" => {
+            let mut outbound = base("http", &server, port)?;
+            for key in ["username", "password", "headers"] {
+                if let Some(value) = proxy.get(key) {
+                    outbound.insert(key.into(), value.clone());
+                }
+            }
+            put(&mut outbound, "tls", clash_tls_options(proxy, truthy(proxy, "tls")));
+            outbound
+        }
         "ss" => {
             if text(proxy, "cipher").is_empty() {
                 return Err("缺少 cipher".into());
@@ -897,6 +1000,19 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
             let mut outbound = base("shadowsocks", &server, port)?;
             outbound.insert("method".into(), json!(text(proxy, "cipher")));
             outbound.insert("password".into(), json!(raw(proxy, "password")));
+            if proxy.contains_key("udp-over-tcp") {
+                let enabled = truthy(proxy, "udp-over-tcp");
+                let version = match text(proxy, "udp-over-tcp-version").as_str() {
+                    "" | "0" | "1" => 1,
+                    "2" => 2,
+                    _ => return Err("udp-over-tcp-version 必须是 1 或 2".into()),
+                };
+                outbound.insert("udp_over_tcp".into(), if enabled && version == 1 {
+                    json!({"enabled": true, "version": 1})
+                } else {
+                    json!(enabled)
+                });
+            }
             let plugin = text(proxy, "plugin");
             if !plugin.is_empty() {
                 let opts = section(proxy, "plugin-opts");
@@ -919,6 +1035,9 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
                             if !value.is_empty() {
                                 options.push_str(&format!(";{key}={value}"));
                             }
+                        }
+                        if opts.contains_key("mux") {
+                            options.push_str(if truthy(&opts, "mux") { ";mux=1" } else { ";mux=0" });
                         }
                         ("v2ray-plugin", options)
                     }
@@ -945,13 +1064,21 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
             if alter != 0 {
                 outbound.insert("alter_id".into(), json!(alter));
             }
+            for (source, target) in [("global-padding", "global_padding"), ("authenticated-length", "authenticated_length")] {
+                if proxy.contains_key(source) {
+                    outbound.insert(target.into(), json!(truthy(proxy, source)));
+                }
+            }
             put(
                 &mut outbound,
                 "tls",
-                clash_tls(proxy, truthy(proxy, "tls")).value(),
+                clash_tls_options(proxy, truthy(proxy, "tls")),
             );
             put(&mut outbound, "transport", clash_transport(proxy)?);
-            outbound.insert("packet_encoding".into(), json!(packet_encoding(proxy)));
+            let encoding = packet_encoding(proxy, &kind)?;
+            if !encoding.is_empty() {
+                outbound.insert("packet_encoding".into(), json!(encoding));
+            }
             outbound
         }
         "vless" => {
@@ -965,31 +1092,60 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
             put(
                 &mut outbound,
                 "tls",
-                clash_tls(proxy, truthy(proxy, "tls") || reality).value(),
+                clash_tls_options(proxy, truthy(proxy, "tls") || reality),
             );
             put(&mut outbound, "transport", clash_transport(proxy)?);
-            outbound.insert("packet_encoding".into(), json!(packet_encoding(proxy)));
+            outbound.insert("packet_encoding".into(), json!(packet_encoding(proxy, &kind)?));
             outbound
         }
         "trojan" => {
             let mut outbound = base("trojan", &server, port)?;
             outbound.insert("password".into(), json!(raw(proxy, "password")));
-            put(&mut outbound, "tls", clash_tls(proxy, true).value());
+            put(&mut outbound, "tls", clash_tls_options(proxy, true));
             put(&mut outbound, "transport", clash_transport(proxy)?);
             outbound
         }
         "hysteria2" => {
             let mut outbound = base("hysteria2", &server, port)?;
+            let mut tls = clash_tls_options(proxy, true).unwrap_or_else(|| json!({"enabled":true}));
+            if uses_realm {
+                if !text(proxy, "ports").is_empty() {
+                    return Err("Hysteria2 Realm 不能与跳端口同时使用".into());
+                }
+                let url = text(&realm, "server-url");
+                let (realm_host, _) = crate::atom_mihomo::realm_address(&url)?;
+                if outbound["server"] != realm_host && text(proxy, "sni").is_empty() {
+                    tls["server_name"] = outbound["server"].clone();
+                }
+                let mut translated = json!({"server_url":url, "realm_id":text(&realm,"realm-id")});
+                for (source, target) in [("token", "token"), ("stun-servers", "stun_servers")] {
+                    if let Some(value) = realm.get(source) {
+                        translated[target] = value.clone();
+                    }
+                }
+                outbound.insert("realm".into(), translated);
+                outbound.remove("server");
+            } else {
+                clash_hysteria2_ports(proxy, &mut outbound)?;
+            }
+            if let Some(profile) = proxy.get("bbr-profile") {
+                outbound.insert("bbr_profile".into(), profile.clone());
+            }
             let password = raw(proxy, "password");
             if !password.is_empty() {
                 outbound.insert("password".into(), json!(password));
             }
             let obfs = text(proxy, "obfs");
             if !obfs.is_empty() {
-                outbound.insert(
-                    "obfs".into(),
-                    json!({"type": obfs, "password": raw(proxy, "obfs-password")}),
-                );
+                let mut config = json!({"type": obfs, "password": raw(proxy, "obfs-password")});
+                if obfs == "gecko" {
+                    for (source, target) in [("obfs-min-packet-size", "min_packet_size"), ("obfs-max-packet-size", "max_packet_size")] {
+                        if let Some(value) = proxy.get(source) {
+                            config[target] = value.clone();
+                        }
+                    }
+                }
+                outbound.insert("obfs".into(), config);
             }
             // Zero (mihomo's "no limit") and what is not a whole Mbps are left
             // out, as before these were read.
@@ -998,10 +1154,13 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
                     outbound.insert(target.into(), json!(mbps));
                 }
             }
-            put(&mut outbound, "tls", clash_tls(proxy, true).value());
+            outbound.insert("tls".into(), tls);
             outbound
         }
         "tuic" => {
+            if proxy.contains_key("heartbeat-interval") {
+                return Err("TUIC 的 heartbeat-interval 是 QUIC 保活，sing-box 的 heartbeat 是协议心跳".into());
+            }
             let mut outbound = base("tuic", &server, port)?;
             outbound.insert("uuid".into(), json!(raw(proxy, "uuid")));
             let password = raw(proxy, "password");
@@ -1016,13 +1175,38 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
             if !relay.is_empty() {
                 outbound.insert("udp_relay_mode".into(), json!(relay));
             }
-            put(&mut outbound, "tls", clash_tls(proxy, true).value());
+            for (source, target) in [
+                ("disable-mtu-discovery", "disable_path_mtu_discovery"),
+                ("reduce-rtt", "zero_rtt_handshake"),
+                ("udp-over-stream", "udp_over_stream"),
+            ] {
+                if proxy.contains_key(source) {
+                    outbound.insert(target.into(), json!(truthy(proxy, source)));
+                }
+            }
+            if truthy(proxy, "udp-over-stream") && text(proxy, "udp-over-stream-version") != "2" {
+                return Err("Mihomo 的 TUIC udp-over-stream 默认用 v1，sing-box 只支持 v2".into());
+            }
+            put(&mut outbound, "tls", clash_tls_options(proxy, true));
             outbound
         }
         "anytls" => {
             let mut outbound = base("anytls", &server, port)?;
             outbound.insert("password".into(), json!(raw(proxy, "password")));
-            put(&mut outbound, "tls", clash_tls(proxy, true).value());
+            for (source, target) in [("idle-session-check-interval", "idle_session_check_interval"), ("idle-session-timeout", "idle_session_timeout")] {
+                if proxy.contains_key(source) {
+                    let seconds = text(proxy, source).parse::<u64>().map_err(|_| format!("{source} 必须是整数秒"))?;
+                    outbound.insert(target.into(), json!(format!("{seconds}s")));
+                }
+            }
+            if proxy.contains_key("min-idle-session") {
+                let min = text(proxy, "min-idle-session").parse::<u64>().map_err(|_| "min-idle-session 必须是整数")?;
+                outbound.insert("min_idle_session".into(), json!(min));
+            }
+            if proxy.contains_key("client-metadata") {
+                outbound.insert("client_metadata".into(), json!(raw(proxy, "client-metadata")));
+            }
+            put(&mut outbound, "tls", clash_tls_options(proxy, true));
             outbound
         }
         "snell" => {
@@ -1084,6 +1268,9 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
                 return Err("hysteria 只支持 udp 协议".into());
             }
             let mut outbound = base("hysteria", &server, port)?;
+            if proxy.contains_key("disable-mtu-discovery") {
+                outbound.insert("disable_path_mtu_discovery".into(), json!(truthy(proxy, "disable-mtu-discovery")));
+            }
             for key in ["up", "down"] {
                 let value = text(proxy, key);
                 if value.is_empty() {
@@ -1105,15 +1292,12 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
                     outbound.insert((*target).into(), json!(value));
                 }
             }
-            let ports = text(proxy, "ports");
-            if !ports.is_empty() {
-                outbound.insert("server_ports".into(), json!(ports.replace('-', ":").split(',').collect::<Vec<_>>()));
-            }
+            clash_port_ranges(proxy, &mut outbound);
             let hop: u64 = text(proxy, "hop-interval").parse().unwrap_or(0);
             if hop != 0 {
                 outbound.insert("hop_interval".into(), json!(format!("{hop}s")));
             }
-            put(&mut outbound, "tls", clash_tls(proxy, true).value());
+            put(&mut outbound, "tls", clash_tls_options(proxy, true));
             outbound
         }
         "socks5" => {
@@ -1134,6 +1318,10 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
         other => return Err(format!("不支持的 Clash 节点类型 `{other}`")),
     };
     put(&mut outbound, "multiplex", clash_smux(proxy, &kind)?);
+    clash_dial_fields(proxy, &mut outbound, &kind)?;
+    if matches!(kind.as_str(), "ss" | "socks5" | "vless" | "vmess" | "trojan" | "snell") && !truthy(proxy, "udp") {
+        outbound.insert("network".into(), json!("tcp"));
+    }
     // sing-box rejects it on AnyTLS and it means nothing over QUIC.
     if truthy(proxy, "tfo") && !matches!(kind.as_str(), "anytls" | "hysteria" | "hysteria2" | "tuic") {
         outbound.insert("tcp_fast_open".into(), json!(true));
@@ -1145,6 +1333,59 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
     }
     let name = text(proxy, "name");
     Ok((clean_name(&name, &outbound), outbound))
+}
+
+fn clash_dial_fields(
+    proxy: &Map<String, Value>, outbound: &mut Map<String, Value>, kind: &str,
+) -> Result<(), String> {
+    if let Some(value) = proxy.get("interface-name") {
+        let interface = value.as_str().ok_or("interface-name 必须是网卡名称")?;
+        outbound.insert("bind_interface".into(), json!(interface));
+    }
+    if proxy.contains_key("routing-mark") {
+        let mark = text(proxy, "routing-mark").parse::<u32>().map_err(|_| "routing-mark 必须是无符号整数")?;
+        outbound.insert("routing_mark".into(), json!(mark));
+    }
+    if let Some(value) = proxy.get("mptcp") {
+        if !matches!(kind, "wireguard" | "hysteria" | "hysteria2" | "tuic") {
+            outbound.insert("tcp_multi_path".into(), json!(value.as_bool().ok_or("mptcp 必须是布尔值")?));
+        }
+    }
+    Ok(())
+}
+
+fn clash_port_ranges(proxy: &Map<String, Value>, outbound: &mut Map<String, Value>) {
+    let ports = text(proxy, "ports");
+    if !ports.is_empty() {
+        let ranges: Vec<String> = ports.split(',').map(|port| {
+            let port = port.trim();
+            match port.split_once('-') {
+                Some((start, end)) => format!("{}:{}", start.trim(), end.trim()),
+                None => format!("{port}:{port}"),
+            }
+        }).collect();
+        outbound.insert("server_ports".into(), json!(ranges));
+    }
+}
+
+fn clash_hysteria2_ports(proxy: &Map<String, Value>, outbound: &mut Map<String, Value>) -> Result<(), String> {
+    clash_port_ranges(proxy, outbound);
+    let interval = text(proxy, "hop-interval");
+    if !interval.is_empty() && interval != "0" {
+        let seconds = |value: &str| value.trim().parse::<u64>().map_err(|_| "hop-interval 必须是秒数或秒数范围");
+        let (start, end) = match interval.split_once('-') {
+            Some((start, end)) => (seconds(start)?, Some(seconds(end)?)),
+            None => (seconds(&interval)?, None),
+        };
+        if start < 5 || end.is_some_and(|end| end < start) {
+            return Err("hop-interval 起点至少为 5 秒，且终点不能小于起点".into());
+        }
+        outbound.insert("hop_interval".into(), json!(format!("{start}s")));
+        if let Some(end) = end.filter(|end| *end != start) {
+            outbound.insert("hop_interval_max".into(), json!(format!("{end}s")));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1170,9 +1411,7 @@ pub(crate) fn from_links(content: &str) -> Result<Vec<Imported>, String> {
         .collect()
 }
 
-/// Nodes from Clash/mihomo YAML: a configuration with `proxies`, a list of
-/// proxies, or one proxy.
-pub(crate) fn from_clash_yaml(content: &str) -> Result<Vec<Imported>, String> {
+fn clash_maps(content: &str) -> Result<Vec<Map<String, Value>>, String> {
     let value: Value =
         yaml_serde::from_str(content).map_err(|error| format!("YAML 无法解析: {error}"))?;
     let proxies = match value {
@@ -1184,19 +1423,149 @@ pub(crate) fn from_clash_yaml(content: &str) -> Result<Vec<Imported>, String> {
         Value::Array(items) => items,
         _ => return Err("YAML 里没有节点".into()),
     };
-    proxies
-        .iter()
+    proxies.into_iter()
         .enumerate()
         .map(|(index, proxy)| {
-            numbered(
-                index,
-                proxy
-                    .as_object()
-                    .ok_or_else(|| "节点必须是映射".to_owned())
-                    .and_then(clash_proxy),
-            )
+            numbered(index, match proxy {
+                Value::Object(proxy) => Ok(proxy),
+                _ => Err("节点必须是映射".to_owned()),
+            })
         })
         .collect()
+}
+
+#[cfg(test)]
+fn from_clash_yaml(content: &str) -> Result<Vec<Imported>, String> {
+    clash_maps(content)?.iter().enumerate()
+        .map(|(index, proxy)| numbered(index, clash_proxy(proxy)))
+        .collect()
+}
+
+pub(crate) fn check_mihomo_proxy(proxy: &Map<String, Value>) -> Result<(), String> {
+    match proxy.get("type").and_then(Value::as_str) {
+        Some("ss" | "ssr" | "socks5" | "http" | "vmess" | "vless" | "snell" | "trojan"
+            | "hysteria" | "hysteria2" | "wireguard" | "tuic" | "shadowquic" | "gost-relay"
+            | "ssh" | "mieru" | "anytls" | "sudoku" | "masque" | "trusttunnel" | "openvpn"
+            | "tailscale" | "zerotier" | "easytier") => {}
+        _ => return Err("未知的 Mihomo 节点类型".into()),
+    }
+    for key in ["name", "dialer-proxy"] {
+        if proxy.keys().any(|field| field.eq_ignore_ascii_case(key)) {
+            return Err(format!("保存的 Mihomo 节点不能带 `{key}`"));
+        }
+    }
+    if text(proxy, "type") == "ssh" {
+        let key = raw(proxy, "private-key");
+        if !key.is_empty() && !key.contains("PRIVATE KEY") {
+            return Err("ssh 的 private-key 要写私钥内容，不能是文件路径".into());
+        }
+    }
+    Ok(())
+}
+
+/// Node imports keep the original Mihomo settings when conversion would lose
+/// information. Re-evaluate that conversion when switching kernels so new
+/// mappings also work for nodes saved by earlier releases.
+pub(crate) fn import_clash_yaml(content: &str) -> Result<Vec<Node>, String> {
+    clash_maps(content)?.into_iter().enumerate().map(|(index, mut proxy)| {
+        let name = text(&proxy, "name");
+        proxy.remove("name");
+        numbered(index, check_mihomo_proxy(&proxy))?;
+        let name = clean_name(&name, &proxy);
+        match singbox_from_clash(&proxy) {
+            Ok((_, outbound)) => Ok(Node::new(name, outbound)),
+            Err(_) => Ok(Node { mihomo: Some(proxy), ..Node::new(name, Map::new()) }),
+        }
+    }).collect()
+}
+
+pub(crate) fn singbox_from_clash(proxy: &Map<String, Value>) -> Result<Imported, String> {
+    let kind = text(proxy, "type");
+    if matches!(kind.as_str(), "wireguard" | "anytls") && !truthy(proxy, "udp") {
+        return Err(format!("Mihomo 的 {kind} 没有启用 UDP，sing-box 无法禁用此协议的 UDP"));
+    }
+    let (name, outbound) = clash_proxy(proxy)?;
+    crate::atom_proxy::check_outbound(&outbound).map_err(|error| error.message)?;
+    let converted = crate::atom_mihomo::convert_outbound("", &outbound)
+        .map_err(|error| format!("无法保留 Mihomo 配置：{error}"))?;
+    let mut comparable = proxy.clone();
+    if kind == "hysteria2" && outbound.contains_key("realm") {
+        comparable.remove("server");
+        comparable.remove("port");
+    }
+    if matches!(kind.as_str(), "vmess" | "vless") {
+        for alias in ["packet-addr", "xudp", "packet-encoding"] {
+            comparable.remove(alias);
+        }
+        let encoding = packet_encoding(proxy, &kind)?;
+        if !encoding.is_empty() {
+            comparable.insert("packet-encoding".into(), json!(encoding));
+        }
+    }
+    if kind == "wireguard" {
+        // Mihomo accepts the peer fields either at the top level or in `peers`.
+        if !comparable.contains_key("peers") {
+            let mut peer = Map::new();
+            for key in ["server", "port", "public-key", "pre-shared-key", "allowed-ips", "reserved"] {
+                if let Some(value) = comparable.remove(key) {
+                    peer.insert(key.into(), value);
+                }
+            }
+            comparable.insert("peers".into(), json!([peer]));
+        }
+        for (key, subnet) in [("ip", 32), ("ipv6", 128)] {
+            if let Some(Value::String(address)) = comparable.get_mut(key) {
+                if !address.contains('/') {
+                    *address = format!("{address}/{subnet}");
+                }
+            }
+        }
+    }
+    if matches!(text(proxy, "type").as_str(), "vmess" | "vless" | "trojan")
+        && comparable.get("network").is_some_and(|value| value == "tcp")
+    {
+        comparable.remove("network");
+    }
+    for key in ["tls", "tfo", "skip-cert-verify"] {
+        if comparable.get(key).is_some_and(|value| value == false) && converted.get(key).is_none() {
+            comparable.remove(key);
+        }
+    }
+    let mut lost = Vec::new();
+    unkept(&Value::Object(comparable), &converted, "", &mut lost);
+    if !lost.is_empty() {
+        return Err(format!("转换到 sing-box 无法保留字段：{}", lost.join("、")));
+    }
+    Ok((name, outbound))
+}
+
+/// Also accept equivalent scalar spellings used by both YAML decoders.
+fn unkept(written: &Value, saved: &Value, path: &str, lost: &mut Vec<String>) {
+    if written == saved { return; }
+    let scalar = |value: &Value| match value {
+        Value::String(text) => Some(text.strip_suffix(" Mbps").filter(|n| n.bytes().all(|b| b.is_ascii_digit())).unwrap_or(text).to_owned()),
+        Value::Number(_) | Value::Bool(_) => Some(value.to_string()),
+        _ => None,
+    };
+    match (written, saved) {
+        (Value::Object(written), Value::Object(saved)) => {
+            for (key, value) in written {
+                let at = if path.is_empty() { key.clone() } else { format!("{path}.{key}") };
+                match saved.get(key) {
+                    Some(kept) => unkept(value, kept, &at, lost),
+                    None if value.is_null() => {}
+                    None => lost.push(at),
+                }
+            }
+        }
+        (Value::Array(written), Value::Array(saved)) if written.len() == saved.len() => {
+            for (index, (value, kept)) in written.iter().zip(saved).enumerate() {
+                unkept(value, kept, &format!("{path}[{index}]"), lost);
+            }
+        }
+        _ if scalar(written).is_some() && scalar(written) == scalar(saved) => {}
+        _ => lost.push(path.to_owned()),
+    }
 }
 
 /// Parses JSON text as copied out of a sing-box configuration: `//` and

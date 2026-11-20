@@ -722,20 +722,19 @@ fn an_exported_node_saves_back_unchanged() {
         assert_eq!(api.outbound(&hk), before, "{}", text["format"]);
     }
 
-    // A field the YAML edit changes but the importer does not read is refused,
-    // not dropped.
+    // A TCP-only Mihomo proxy becomes a TCP-only sing-box outbound.
     assert!(yaml.contains("udp: true"), "{yaml}");
     let body = serde_json::json!({"format": "yaml", "content": yaml.replace("udp: true", "udp: false")});
+    let (status, saved) = api.call("PUT", &format!("/api/v1/atom/nodes/{hk}"), &body.to_string());
+    assert_eq!(status, 200, "{saved}");
+    let tcp_only = api.outbound(&hk);
+    assert_eq!(tcp_only["network"], "tcp");
+    // References to other proxies must still be configured through groups.
+    let body = serde_json::json!({"format": "yaml", "content": format!("{yaml}dialer-proxy: another-node\n")});
     let (status, refused) = api.call("PUT", &format!("/api/v1/atom/nodes/{hk}"), &body.to_string());
     assert_eq!(status, 400, "{refused}");
-    assert!(refused["error"].as_str().unwrap().contains("udp"), "{refused}");
-    assert_eq!(api.outbound(&hk), before);
-    // Read as an outbound mihomo has no form for: refused, nothing saved.
-    let body = serde_json::json!({"format": "yaml", "content": format!("{yaml}disable-sni: true\n")});
-    let (status, refused) = api.call("PUT", &format!("/api/v1/atom/nodes/{hk}"), &body.to_string());
-    assert_eq!(status, 400, "{refused}");
-    assert!(refused["error"].as_str().unwrap().contains("mihomo"), "{refused}");
-    assert_eq!(api.outbound(&hk), before);
+    assert!(refused["error"].as_str().unwrap().contains("dialer-proxy"), "{refused}");
+    assert_eq!(api.outbound(&hk), tcp_only);
 
     // Hysteria2 bandwidth and a VLESS packet encoding come back from YAML; a
     // node the YAML cannot carry whole is offered only as JSON.
@@ -1669,6 +1668,44 @@ fn backend_check_lists_nodes_mihomo_cannot_run_and_the_switch_needs_confirmation
     assert_eq!(status, 400);
     let (_, settings) = api.call("GET", "/api/v1/atom/settings", "");
     assert_eq!(settings["backend"], "sing-box");
+}
+
+#[test]
+fn backend_check_allows_ss_interface_and_keeps_native_mihomo_nodes() {
+    let mut api = Api::new("native-proxies");
+    let (status, imported) = api.call("POST", "/api/v1/atom/nodes", r#"{
+        "format":"json", "content":{"tag":"Bound SS","type":"shadowsocks","server":"ss.example",
+        "server_port":443,"method":"aes-128-gcm","password":"dummy","bind_interface":"lo"}
+    }"#);
+    assert_eq!(status, 201, "{imported}");
+    let id = imported["nodes"][0]["id"].as_str().unwrap();
+    let (status, yaml) = api.call("GET", &format!("/api/v1/atom/nodes/{id}/export?format=yaml"), "");
+    assert_eq!(status, 200, "{yaml}");
+    assert!(yaml["content"].as_str().unwrap().contains("interface-name: lo"));
+    let body = serde_json::json!({"format":"yaml", "content":yaml["content"]});
+    let (status, saved) = api.call("PUT", &format!("/api/v1/atom/nodes/{id}"), &body.to_string());
+    assert_eq!(status, 200, "{saved}");
+    assert_eq!(api.outbound(id)["bind_interface"], "lo");
+
+    let (status, native) = api.call("POST", "/api/v1/atom/nodes", r#"{
+        "format":"yaml", "content":"{name: TLS SOCKS, type: socks5, server: socks.example, port: 443, tls: true}"
+    }"#);
+    assert_eq!(status, 201, "{native}");
+    let native_id = native["nodes"][0]["id"].as_str().unwrap();
+    assert_eq!(native["nodes"][0]["active"], false);
+    assert_eq!(native["nodes"][0]["server_port"], 443);
+    api.restart();
+    let (status, yaml) = api.call("GET", &format!("/api/v1/atom/nodes/{native_id}/export"), "");
+    assert_eq!(status, 200, "{yaml}");
+    assert_eq!(yaml["format"], "yaml");
+    assert!(yaml["content"].as_str().unwrap().contains("tls: true"));
+
+    let (_, check) = api.call("GET", "/api/v1/atom/settings/backend-check?target=mihomo", "");
+    assert_eq!(check["inactive_nodes"], serde_json::json!([]));
+    let (_, check) = api.call("GET", "/api/v1/atom/settings/backend-check?target=sing-box", "");
+    assert_eq!(check["inactive_nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(check["inactive_nodes"][0]["id"], native_id);
+    assert!(check["inactive_nodes"][0]["reason"].as_str().unwrap().contains("TLS"));
 }
 
 /// `POST nodes/delete` deletes several nodes with one sing-box reload; when

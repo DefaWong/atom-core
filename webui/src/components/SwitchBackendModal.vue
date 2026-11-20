@@ -54,7 +54,11 @@ async function confirm() {
   busy.value = true
   error.value = ''
   try {
-    const body = props.target === 'sing-box' ? { backend: props.target, group_actions: { ...actions } } : { backend: props.target, ...(inactive.value.length ? { confirm_inactive_nodes: true } : {}) }
+    const body = {
+      backend: props.target,
+      ...(props.target === 'sing-box' ? { group_actions: { ...actions } } : {}),
+      ...(inactive.value.length ? { confirm_inactive_nodes: true } : {})
+    }
     await call(client.PUT('/settings', { body }))
     toast('ok', `已切换到 ${props.target}`)
     emit('done')
@@ -102,9 +106,9 @@ async function confirm() {
           </div>
         </div>
       </template>
-      <div v-else-if="inactive.length" class="grid" style="gap: 8px">
-        <h4 class="sec">mihomo 不支持的节点 <span class="tag">{{ inactive.length }}</span></h4>
-        <div class="warnbox">这些节点在 mihomo 下不生效，会从所在的组里暂时移除。节点保留，切回 sing-box 时恢复。</div>
+      <div v-if="inactive.length" class="grid" style="gap: 8px">
+        <h4 class="sec">切换后不生效的节点 <span class="tag">{{ inactive.length }}</span></h4>
+        <div class="warnbox">这些节点在 {{ target }} 下不生效，会从所在的组里暂时移除。原配置保留，切回当前内核时恢复。</div>
         <div v-for="node in inactive" :key="node.id" class="item">
           <span class="nm">{{ node.name }} <span class="tag">{{ (node.type ?? '').toUpperCase() }}</span></span>
           <span class="t2">{{ node.reason }}</span>

@@ -99,7 +99,28 @@ pub(crate) struct Node {
     pub(crate) id: String,
     pub(crate) name: String,
     /// The sing-box outbound without its `tag` (the tag is `id`).
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub(crate) outbound: Map<String, Value>,
+    /// The original Mihomo proxy when it cannot be stored as a sing-box node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) mihomo: Option<Map<String, Value>>,
+}
+
+impl Node {
+    pub(crate) fn new(name: String, outbound: Map<String, Value>) -> Self {
+        Self { id: String::new(), name, outbound, mihomo: None }
+    }
+
+    pub(crate) fn kind(&self) -> Option<&Value> {
+        self.mihomo.as_ref().unwrap_or(&self.outbound).get("type")
+    }
+
+    pub(crate) fn singbox_outbound(&self) -> Result<Map<String, Value>, String> {
+        match &self.mihomo {
+            Some(proxy) => crate::atom_links::singbox_from_clash(proxy).map(|(_, outbound)| outbound),
+            None => Ok(self.outbound.clone()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -224,6 +245,13 @@ pub(crate) enum Backend {
 }
 
 impl Backend {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::SingBox => "sing-box",
+            Self::Mihomo => "mihomo",
+        }
+    }
+
     fn is_default(&self) -> bool {
         *self == Self::SingBox
     }
@@ -404,7 +432,8 @@ pub(crate) fn check_outbound(outbound: &Map<String, Value>) -> Result<(), Refusa
             return Err(invalid(format!("节点的 outbound 不能带 `{key}`")));
         }
     }
-    if kind != "wireguard" {
+    let uses_realm = kind == "hysteria2" && outbound.get("realm").is_some_and(Value::is_object);
+    if kind != "wireguard" && !uses_realm {
         let server = outbound.get("server").and_then(Value::as_str).unwrap_or("");
         if server.trim().is_empty() {
             return Err(invalid(format!("{kind} 节点需要 server")));
@@ -701,7 +730,12 @@ impl ProxyState {
                 return Err(invalid(format!("节点 ID `{}` 重复", node.id)));
             }
             check_name("节点", &node.name)?;
-            check_outbound(&node.outbound)
+            let result = match &node.mihomo {
+                Some(proxy) if node.outbound.is_empty() => crate::atom_links::check_mihomo_proxy(proxy).map_err(invalid),
+                Some(_) => Err(invalid("节点只能保存一份原生配置")),
+                None => check_outbound(&node.outbound),
+            };
+            result
                 .map_err(|refusal| invalid(format!("节点 {}: {}", node.id, refusal.message)))?;
         }
         let mut groups = BTreeSet::new();
@@ -928,18 +962,17 @@ impl ProxyState {
         })
     }
 
-    /// The nodes the active kernel cannot run, with the reason. Only mihomo
-    /// converts nodes (sing-box takes them as they are stored).
+    /// Nodes whose stored configuration has no equivalent for this kernel.
     pub(crate) fn inactive_nodes_for(&self, backend: Backend) -> BTreeMap<String, String> {
-        if backend != Backend::Mihomo {
-            return BTreeMap::new();
-        }
         self.nodes
             .iter()
             .filter_map(|node| {
-                crate::atom_mihomo::convert_proxy(node)
-                    .err()
-                    .map(|reason| (node.id.clone(), reason))
+                let result = match backend {
+                    Backend::Mihomo if node.mihomo.is_none() => crate::atom_mihomo::convert_proxy(node).map(|_| ()),
+                    Backend::SingBox if node.mihomo.is_some() => node.singbox_outbound().map(|_| ()),
+                    _ => Ok(()),
+                };
+                result.err().map(|reason| (node.id.clone(), reason))
             })
             .collect()
     }
@@ -1046,11 +1079,10 @@ impl ProxyState {
 
     // ---- changes (each returns the next state's new pieces) --------------
 
-    pub(crate) fn add_nodes(&mut self, imported: Vec<(String, Map<String, Value>)>) -> Vec<Node> {
+    pub(crate) fn add_nodes(&mut self, imported: Vec<Node>) -> Vec<Node> {
         let mut added = Vec::new();
-        for (name, outbound) in imported {
-            let id = crate::atom_rules::new_id("n-", &|id| self.taken(id));
-            let node = Node { id, name, outbound };
+        for mut node in imported {
+            node.id = crate::atom_rules::new_id("n-", &|id| self.taken(id));
             self.nodes.push(node.clone());
             added.push(node);
         }
@@ -1061,7 +1093,7 @@ impl ProxyState {
         &mut self,
         id: &str,
         name: Option<String>,
-        outbound: Option<Map<String, Value>>,
+        imported: Option<Node>,
     ) -> Result<Node, Refusal> {
         let node = self
             .nodes
@@ -1071,8 +1103,9 @@ impl ProxyState {
         if let Some(name) = name {
             node.name = name;
         }
-        if let Some(outbound) = outbound {
-            node.outbound = outbound;
+        if let Some(imported) = imported {
+            node.outbound = imported.outbound;
+            node.mihomo = imported.mihomo;
         }
         let node = node.clone();
         // A rename can take a node out of a filtered group: a selection on
