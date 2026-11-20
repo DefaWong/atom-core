@@ -553,3 +553,26 @@ fn clash_smux_rates_units_and_protocols_follow_mihomo() {
     let any = from_clash_yaml("- {name: a, type: anytls, server: v, port: 1, password: p, tfo: true}").unwrap();
     assert!(any[0].1.get("tcp_fast_open").is_none());
 }
+
+#[test]
+fn clash_packet_encoding_follows_mihomo_for_vmess_and_vless() {
+    let cases = [
+        ("vless", json!({}), Ok("xudp")),
+        ("vless", json!({"packet-addr": true}), Ok("packetaddr")),
+        ("vless", json!({"packet-addr": true, "xudp": true}), Ok("xudp")),
+        ("vless", json!({"packet-encoding": "xudp", "packet-addr": true}), Ok("packetaddr")),
+        ("vless", json!({"packet-encoding": "packet"}), Ok("packetaddr")),
+        ("vless", json!({"packet-encoding": "bogus"}), Err(())),
+        ("vmess", json!({}), Ok("")),
+        ("vmess", json!({"packet-addr": true}), Ok("packetaddr")),
+        ("vmess", json!({"xudp": true}), Ok("xudp")),
+        ("vmess", json!({"packet-encoding": "packet"}), Ok("packetaddr")),
+        ("vmess", json!({"packet-encoding": "xudp", "packet-addr": true}), Ok("xudp")),
+        ("vmess", json!({"packet-encoding": "bogus"}), Err(())),
+        ("trojan", json!({}), Err(())),
+    ];
+    for (kind, proxy, want) in cases {
+        let got = packet_encoding(proxy.as_object().unwrap(), kind);
+        assert_eq!(got.map_err(|_| ()), want, "{kind} {proxy}");
+    }
+}
