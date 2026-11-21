@@ -64,6 +64,20 @@ test('aggregateTraffic falls back to cumulative totals when live rates are zero'
   assert.equal(summary.proxyShare, 23)
 })
 
+test('aggregateTraffic classifies Mihomo traffic by its final outbound and keeps the outer group', () => {
+  const conn = { host: 'example.com', ip: '', src: '', network: 'tcp', download: 100, upload: 0, dlRate: 10, ulRate: 0 }
+  const summary = aggregateTraffic([
+    { ...conn, chain: ['DIRECT'] },
+    { ...conn, chain: ['g-default', 'DIRECT'] },
+    { ...conn, chain: ['g-default', 'n-hk'] },
+    { ...conn, chain: ['g-default', 'REJECT'] }
+  ], 'group', nameOf)
+
+  assert.equal(summary.directShare, 67)
+  assert.equal(summary.proxyShare, 33)
+  assert.deepEqual(summary.items.map(({ key, count }) => [key, count]), [['g-default', 3], ['direct', 1]])
+})
+
 test('appendTrafficSample updates current bucket in place and caps length', () => {
   let series = []
   series = appendTrafficSample(series, { ts: 100_100, down: 100, up: 10 }, 2_000, 3)

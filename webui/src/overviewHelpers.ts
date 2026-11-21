@@ -61,6 +61,12 @@ export interface BreakdownSummary {
 
 const COLORS = ['var(--c1)', 'var(--c4)', 'var(--c2)', 'var(--c3)', 'var(--c5)']
 
+function trafficTag(tag: string): string {
+  if (tag === 'DIRECT' || tag === 'COMPATIBLE') return 'direct'
+  if (tag === 'REJECT' || tag === 'REJECT-DROP') return 'block'
+  return tag
+}
+
 /** Aggregates active connections by group, client IP, or host for the overview breakdown card. */
 export function aggregateTraffic(
   conns: readonly ConnectionLike[],
@@ -93,15 +99,15 @@ export function aggregateTraffic(
     if (net.startsWith('tcp')) tcp++
     else if (net.startsWith('udp')) udp++
 
-    const outer = conn.chain[0] || 'direct'
-    const leaf = conn.chain[conn.chain.length - 1]
+    const outer = trafficTag(conn.chain[0] || 'direct')
+    const leaf = trafficTag(conn.chain[conn.chain.length - 1] || outer)
     const rate = Math.max(0, conn.dlRate) + Math.max(0, conn.ulRate)
     const total = Math.max(0, conn.download) + Math.max(0, conn.upload)
 
-    if (outer === 'direct') {
+    if (leaf === 'direct') {
       directRate += rate
       directTotal += total
-    } else if (outer !== 'block') {
+    } else if (leaf !== 'block') {
       proxyRate += rate
       proxyTotal += total
     }
